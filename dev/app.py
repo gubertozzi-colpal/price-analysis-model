@@ -214,14 +214,71 @@ def method_corr_pivot(df: pd.DataFrame, value_col: str, method: str, id_prod: st
     corr.columns.name = id_prod
     return corr
 
-def price_vs_bsr_corr(df: pd.DataFrame, method:str, id_prod) -> pd.DataFrame:
+def price_vs_bsr_corr(df: pd.DataFrame, method:str, id_prod: str) -> pd.DataFrame:
     """
     Calcula a correlação entre Preço e BSR (Sales Rank) para cada produto.
     Ajuda a entender se a queda de preço melhora o ranking (correlação positiva).
     """
     out = []
     columns_map = {'ASIN': 'asin', 'Descrição': 'sku_name'}
-    for asin, g in df.groupby("asin"):
+    for asin, g in df.groupby(columns_map[id_prod]):
+        n = g[["price_effective", "bsr"]].dropna().shape[0]
+        # Exige ao menos 30 dias de dados para ser estatisticamente relevante
+        r = g[["price_effective", "bsr"]].corr(method=method.lower()).iloc[0, 1] if n >= 30 else np.nan
+        out.append({"asin": asin, "spearman_price_bsr": r, "n_obs": n})
+    return pd.DataFrame(out).sort_values("spearman_price_bsr", ascending=False)
+
+def cross_price_bsr_matrix(df: pd.DataFrame, method="spearman", id_prod='asin', min_periods=30) -> pd.DataFrame:
+    """
+    Gera uma matriz onde:
+    - Linhas (Index) = ASIN cujo PREÇO mudou.
+    - Colunas = ASIN cujo BSR (Rank) reagiu.
+    
+    Exemplo de leitura: Valor na linha A, coluna B diz a correlação entre
+    o Preço de A e as Vendas (BSR) de B.
+    """
+    # 1. Pivotar Preços e BSRs separadamente
+    # Index = Dia, Colunas = ASINs
+    columns_map = {'ASIN': 'asin', 'Descrição': 'sku_name'}
+    prices = df.pivot(index="day", columns=columns_map[id_prod], values="price_effective").sort_index(axis=1)
+    ranks = df.pivot(index="day", columns=columns_map[id_prod], values="bsr").sort_index(axis=1)
+
+    # Garante que temos as mesmas colunas em ambos
+    common_asins = prices.columns.intersection(ranks.columns)
+    prices = prices[common_asins]
+    ranks = ranks[common_asins]
+
+    # 2. Calcular correlações cruzadas
+    # Vamos usar um loop eficiente com corrwith para comparar 
+    # "Preço de Um" contra "BSR de Todos"
+    matrix_data = {}
+    
+    for asin_driver in common_asins:
+        # Série de preço do "Driver"
+        p_series = prices[asin_driver]
+        
+        # Correlaciona esse preço contra TODOS os BSRs de uma vez
+        # O resultado é uma Series com index = asin (responder)
+        corrs = ranks.corrwith(p_series, method=method.lower(), drop=True)
+        
+        # Filtra quem não tem dados suficientes (min_periods não funciona direto no corrwith do jeito que queremos aqui as vezes,
+        # mas o pandas lida com NaNs. Se quiser ser estrito, precisaria validar intersecção de índices).
+        matrix_data[asin_driver] = corrs
+
+    # Monta o DataFrame final (Transposta para ficar Linha=Preço, Coluna=BSR)
+    cross_matrix = pd.DataFrame(matrix_data).T
+    cross_matrix.index.name = "asin_price_driver"
+    cross_matrix.columns.name = "asin_bsr_responder"
+    
+    return cross_matrix
+
+def price_vs_bsr_corr_kmean(df: pd.DataFrame, method:str) -> pd.DataFrame:
+    """
+    Calcula a correlação entre Preço e BSR (Sales Rank) para cada produto.
+    Ajuda a entender se a queda de preço melhora o ranking (correlação positiva).
+    """
+    out = []
+    for asin, g in df.groupby('asin'):
         n = g[["price_effective", "bsr"]].dropna().shape[0]
         # Exige ao menos 30 dias de dados para ser estatisticamente relevante
         r = g[["price_effective", "bsr"]].corr(method=method.lower()).iloc[0, 1] if n >= 30 else np.nan
@@ -340,7 +397,7 @@ def competitive_map(df: pd.DataFrame, k=4, random_state=42) -> pd.DataFrame:
     preço, share de promoção e sensibilidade ao BSR.
     """
     summ = sku_summary(df)
-    sens = price_vs_bsr_corr(df, ctl_corr)[["asin", "spearman_price_bsr"]]
+    sens = price_vs_bsr_corr_kmean(df, ctl_corr)[["asin", "spearman_price_bsr"]]
     feat = summ.merge(sens, on="asin", how="left").copy()
 
     # Imputação de nulos pela mediana para o modelo
@@ -706,12 +763,13 @@ daily_f = meta_filters_ui(daily)
 
 # Build artifacts on filtered data
 summ = sku_summary(daily_f)
-sens = price_vs_bsr_corr(daily_f, ctl_corr)
+sens = price_vs_bsr_corr(daily_f, ctl_corr, ctl_prod)
 summ2 = summ.merge(sens[["asin", "spearman_price_bsr"]], on="asin", how="left")
 best_prices = build_best_prices(daily_f)
 monthly = monthly_agg(daily_f)
 price_corr = method_corr_pivot(daily_f, "price_effective",ctl_corr, ctl_prod)
 bsr_corr = method_corr_pivot(daily_f, "bsr",ctl_corr, ctl_prod)
+cross_corr = cross_price_bsr_matrix(daily_f, ctl_corr, ctl_prod)
 asins = sorted(daily_f["asin"].unique().tolist())
 
 # Tabs
@@ -828,12 +886,25 @@ with tabs[3]:
     fig2 = px.imshow(bsr_corr, text_auto=True, aspect="auto", title=f"Correlação {ctl_corr} de BSR (diária)")
     st.plotly_chart(fig2, width='stretch')
 
-    fig3 = px.bar(sens.sort_values("spearman_price_bsr", ascending=False),
+    fig3 = px.imshow(cross_corr, text_auto=True, aspect="auto", title=f"Correlação {ctl_corr} Cruzada (diária)")
+    st.plotly_chart(fig3, width='stretch')
+
+    fig4 = px.bar(sens.sort_values("spearman_price_bsr", ascending=False),
                   x="asin", y="spearman_price_bsr",
-                  title=f"Sensibilidade: {ctl_corr}(Preço, BSR) – positivo = preço↑ tende a piorar rank",
+                  title=f"Sensibilidade: {ctl_corr}(Preço, BSR)",
                   labels={"spearman_price_bsr": "Sensibilidade",
                           "asin": "Produto"})
-    st.plotly_chart(fig3, width='stretch')
+    
+    fig4.update_traces(texttemplate="%{y:.4f}", 
+                       textposition="inside")
+    
+    fig4.update_layout(uniformtext_minsize=12, 
+                       uniformtext_mode='hide')
+    
+
+
+
+    st.plotly_chart(fig4, width='stretch')
 
 # Tab 5
 with tabs[4]:
