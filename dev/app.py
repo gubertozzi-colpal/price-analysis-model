@@ -201,38 +201,30 @@ def add_base_and_promo(daily: pd.DataFrame, roll_days=30, q=0.8, promo_threshold
     df["price_promo"] = np.where(df["is_promo"], df["price_effective"], np.nan)
     return df
 
-def spearman_corr_pivot(df: pd.DataFrame, value_col: str) -> pd.DataFrame:
+def method_corr_pivot(df: pd.DataFrame, value_col: str, method: str, id_prod: str) -> pd.DataFrame:
     """
-    Calcula a correlação de Spearman entre diferentes ASINs para uma métrica 
+    Calcula a correlação de <method> entre diferentes ASINs para uma métrica 
     específica (ex: preço), pivotando a tabela para ter ASINs como colunas.
     """
-    pivot = df.pivot(index="day", columns="asin", values=value_col)
-    corr = pivot.corr(method="spearman", min_periods=60)
-    corr.index.name = "asin"
-    corr.columns.name = "asin"
+
+    columns_map = {'ASIN': 'asin', 'Descrição': 'sku_name'}
+    pivot = df.pivot(index="day", columns=columns_map[id_prod], values=value_col)
+    corr = pivot.corr(method=method.lower(), min_periods=60)
+    corr.index.name = id_prod
+    corr.columns.name = id_prod
     return corr
 
-def pearson_corr_pivot(df: pd.DataFrame, value_col: str) -> pd.DataFrame:
-    """
-    Calcula a correlação de Pearson entre diferentes ASINs para uma métrica 
-    específica (ex: preço), pivotando a tabela para ter ASINs como colunas.
-    """
-    pivot = df.pivot(index="day", columns="asin", values=value_col)
-    corr = pivot.corr(method="pearson", min_periods=60)
-    corr.index.name = "asin"
-    corr.columns.name = "asin"
-    return corr
-
-def price_vs_bsr_corr(df: pd.DataFrame) -> pd.DataFrame:
+def price_vs_bsr_corr(df: pd.DataFrame, method:str, id_prod) -> pd.DataFrame:
     """
     Calcula a correlação entre Preço e BSR (Sales Rank) para cada produto.
     Ajuda a entender se a queda de preço melhora o ranking (correlação positiva).
     """
     out = []
+    columns_map = {'ASIN': 'asin', 'Descrição': 'sku_name'}
     for asin, g in df.groupby("asin"):
         n = g[["price_effective", "bsr"]].dropna().shape[0]
         # Exige ao menos 30 dias de dados para ser estatisticamente relevante
-        r = g[["price_effective", "bsr"]].corr(method="spearman").iloc[0, 1] if n >= 30 else np.nan
+        r = g[["price_effective", "bsr"]].corr(method=method.lower()).iloc[0, 1] if n >= 30 else np.nan
         out.append({"asin": asin, "spearman_price_bsr": r, "n_obs": n})
     return pd.DataFrame(out).sort_values("spearman_price_bsr", ascending=False)
 
@@ -343,15 +335,20 @@ def monthly_agg(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def competitive_map(df: pd.DataFrame, k=4, random_state=42) -> pd.DataFrame:
+    """
+    Aplica KMeans para agrupar SKUs com comportamentos similares baseados em 
+    preço, share de promoção e sensibilidade ao BSR.
+    """
     summ = sku_summary(df)
-    sens = price_vs_bsr_corr(df)[["asin", "spearman_price_bsr"]]
+    sens = price_vs_bsr_corr(df, ctl_corr)[["asin", "spearman_price_bsr"]]
     feat = summ.merge(sens, on="asin", how="left").copy()
 
+    # Imputação de nulos pela mediana para o modelo
     for c in ["avg_discount_when_promo", "spearman_price_bsr"]:
         feat[c] = feat[c].fillna(feat[c].median())
 
     X = feat[["avg_price", "promo_share", "avg_discount_when_promo", "bsr_med", "spearman_price_bsr"]].values
-    Xs = StandardScaler().fit_transform(X)
+    Xs = StandardScaler().fit_transform(X) # Padronização de escala
     k = max(2, min(k, len(feat)))
     km = KMeans(n_clusters=k, n_init="auto", random_state=random_state)
     feat["cluster"] = km.fit_predict(Xs)
@@ -440,7 +437,13 @@ def apply_column_mapping(meta: pd.DataFrame, mapping: Dict[str, Optional[str]]) 
 
 
 def validate_metadata(meta: pd.DataFrame, asins_in_data: List[str]) -> Tuple[pd.DataFrame, Dict[str, object]]:
-    """Return cleaned meta + diagnostics dict."""
+    """
+    Valida e limpa o arquivo de metadados enviado pelo usuário.
+    - Garante a presença da coluna 'asin'.
+    - Remove duplicatas.
+    - Normaliza colunas booleanas.
+    - Gera diagnósticos de cobertura (quais ASINs do dataset faltam no metadata).
+    """
     diag = {"errors": [], "warnings": [], "coverage": {}}
 
     if meta is None or meta.empty:
@@ -567,9 +570,9 @@ with st.sidebar:
     data_glob = st.text_input("DATA_GLOB (caminho/curinga dos CSVs)", value=DEFAULT_DATA_GLOB)
     dayfirst = st.toggle("Datas no formato dia/mês (dayfirst)", value=True)
 
-    #st.subheader("Controle de Correlação")
-    #ctl_corr = st.selectbox("Tipo de Correlação", ["Pearson", "Spearmann"], index=1)
-    #ctl_prod = st.selectbox("Tipo de Descrição", ["ASIN", "Descrição"], index=1)
+    st.subheader("Controle de Correlação")
+    ctl_corr = st.selectbox("Tipo de Correlação", ["Kendall", "Pearson", "Spearman"], index=2)
+    ctl_prod = st.selectbox("Identificador", ["ASIN", "Descrição"], index=1)
 
     st.subheader("Separação Base vs Promo")
     roll_days = st.slider("Janela base (dias)", 14, 60, 30, 1)
@@ -703,12 +706,12 @@ daily_f = meta_filters_ui(daily)
 
 # Build artifacts on filtered data
 summ = sku_summary(daily_f)
-sens = price_vs_bsr_corr(daily_f)
+sens = price_vs_bsr_corr(daily_f, ctl_corr)
 summ2 = summ.merge(sens[["asin", "spearman_price_bsr"]], on="asin", how="left")
 best_prices = build_best_prices(daily_f)
 monthly = monthly_agg(daily_f)
-price_corr = spearman_corr_pivot(daily_f, "price_effective")
-bsr_corr = spearman_corr_pivot(daily_f, "bsr")
+price_corr = method_corr_pivot(daily_f, "price_effective",ctl_corr, ctl_prod)
+bsr_corr = method_corr_pivot(daily_f, "bsr",ctl_corr, ctl_prod)
 asins = sorted(daily_f["asin"].unique().tolist())
 
 # Tabs
@@ -749,7 +752,7 @@ with tabs[0]:
         """
     )
 
-    st.dataframe(enrich_with_meta(summ2).sort_values("bsr_med"), use_container_width=True, hide_index=True)
+    st.dataframe(enrich_with_meta(summ2).sort_values("bsr_med"), width='stretch', hide_index=True)
 
 # Tab 2
 with tabs[1]:
@@ -764,20 +767,20 @@ with tabs[1]:
     if freq == "Mensal":
         fig = px.line(monthly.sort_values("month_dt"), x="month_dt", y="price", color="asin", markers=True,
                       title="Preço médio mensal (price_effective)")
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width='stretch')
 
         fig2 = px.line(monthly.sort_values("month_dt"), x="month_dt", y="bsr_med", color="asin", markers=True,
                        title="BSR mediano mensal (menor é melhor)")
-        st.plotly_chart(fig2, use_container_width=True)
+        st.plotly_chart(fig2, width='stretch')
     else:
         pick = st.multiselect("Selecione ASINs", options=asins, default=asins[: min(6, len(asins))])
         d = daily_f[daily_f["asin"].isin(pick)].copy()
 
         fig = px.line(d, x="day", y="price_effective", color="asin", title="Preço efetivo diário")
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width='stretch')
 
         fig2 = px.line(d, x="day", y="bsr", color="asin", title="BSR diário (menor é melhor)")
-        st.plotly_chart(fig2, use_container_width=True)
+        st.plotly_chart(fig2, width='stretch')
 
 # Tab 3
 with tabs[2]:
@@ -797,17 +800,17 @@ with tabs[2]:
     fig.add_trace(go.Scatter(x=g["day"], y=g["price_effective"], mode="lines", name="Preço efetivo"))
     fig.add_trace(go.Scatter(x=g["day"], y=g["price_base"], mode="lines", name="Preço base"))
     fig.update_layout(title=f"Preço efetivo vs Base – {title_name}", xaxis_title="Dia", yaxis_title="Preço (R$)")
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width='stretch')
 
     fig2 = px.scatter(g, x="discount_pct", y="bsr", color="is_promo",
                       title=f"Profundidade (vs base) x BSR – {title_name}",
                       labels={"discount_pct": "Desconto vs base", "bsr": "BSR"})
-    st.plotly_chart(fig2, use_container_width=True)
+    st.plotly_chart(fig2, width='stretch')
 
     promo_depth = daily_f[daily_f["is_promo"]].copy()
     fig3 = px.box(promo_depth, x="asin", y=promo_depth["discount_pct"] * 100,
                   title="Distribuição de profundidade promocional (% vs base)", labels={"y": "% desconto vs base"})
-    st.plotly_chart(fig3, use_container_width=True)
+    st.plotly_chart(fig3, width='stretch')
 
 # Tab 4
 with tabs[3]:
@@ -819,24 +822,18 @@ with tabs[3]:
         """
     )
 
-    col1, col2 = st.columns(2)
-    with col1:
-        ctl_corr = st.selectbox("Tipo de Correlação", ["Pearson", "Spearmann"], index=1)
+    fig = px.imshow(price_corr, text_auto=True, aspect="auto", title=f"Correlação {ctl_corr} de preço (diária)")
+    st.plotly_chart(fig, width='stretch')
 
-    with col2:
-        ctl_prod = st.selectbox("Tipo de Descrição", ["ASIN", "Descrição"], index=1)
-
-
-    fig = px.imshow(price_corr, text_auto=True, aspect="auto", title="Correlação Spearman de preço (diária)")
-    st.plotly_chart(fig, use_container_width=True)
-
-    fig2 = px.imshow(bsr_corr, text_auto=True, aspect="auto", title="Correlação Spearman de BSR (diária)")
-    st.plotly_chart(fig2, use_container_width=True)
+    fig2 = px.imshow(bsr_corr, text_auto=True, aspect="auto", title=f"Correlação {ctl_corr} de BSR (diária)")
+    st.plotly_chart(fig2, width='stretch')
 
     fig3 = px.bar(sens.sort_values("spearman_price_bsr", ascending=False),
                   x="asin", y="spearman_price_bsr",
-                  title="Sensibilidade: Spearman(Preço, BSR) – positivo = preço↑ tende a piorar rank")
-    st.plotly_chart(fig3, use_container_width=True)
+                  title=f"Sensibilidade: {ctl_corr}(Preço, BSR) – positivo = preço↑ tende a piorar rank",
+                  labels={"spearman_price_bsr": "Sensibilidade",
+                          "asin": "Produto"})
+    st.plotly_chart(fig3, width='stretch')
 
 # Tab 5
 with tabs[4]:
@@ -869,11 +866,11 @@ with tabs[4]:
             idx_m = idx_m.groupby(["asin", "month_dt"], as_index=False)["price_index"].mean()
             fig = px.line(idx_m, x="month_dt", y="price_index", color="asin", title=f"Índice de preço mensal vs {leader}")
             fig.add_hline(y=1.0, line_dash="dash", annotation_text="Referência = 1.0")
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width='stretch')
         else:
             fig = px.line(idx, x="day", y="price_index", color="asin", title=f"Índice de preço diário vs {leader}")
             fig.add_hline(y=1.0, line_dash="dash", annotation_text="Referência = 1.0")
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width='stretch')
 
 # Tab 6
 with tabs[5]:
@@ -886,7 +883,7 @@ with tabs[5]:
     )
 
     if not best_prices.empty:
-        st.dataframe(enrich_with_meta(best_prices), use_container_width=True, hide_index=True)
+        st.dataframe(enrich_with_meta(best_prices), width='stretch', hide_index=True)
     else:
         st.info("Sem cálculo robusto de preço mágico (poucos buckets repetidos).")
 
@@ -898,11 +895,11 @@ with tabs[5]:
         title_name = daily_f.loc[daily_f["asin"] == a, "sku_name"].iloc[0] if "sku_name" in daily_f.columns else a
         fig = px.line(el, x="price_bucket", y="bsr_median", markers=True,
                       title=f"Curva preço → BSR mediano (buckets) – {title_name}")
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width='stretch')
 
         fig2 = px.bar(el, x="price_bucket", y="elasticity_proxy",
                       title=f"Elasticidade (proxy) – {title_name} (Δlog(BSR)/Δpreço)")
-        st.plotly_chart(fig2, use_container_width=True)
+        st.plotly_chart(fig2, width='stretch')
 
 # Tab 7
 with tabs[6]:
@@ -916,7 +913,7 @@ with tabs[6]:
 
     comp = competitive_map(daily_f, k=k_clusters)
     comp = enrich_with_meta(comp)
-    st.dataframe(comp.sort_values(["cluster", "avg_price"]), use_container_width=True, hide_index=True)
+    st.dataframe(comp.sort_values(["cluster", "avg_price"]), width='stretch', hide_index=True)
 
     hover_cols = [c for c in ["asin", "sku_name", "brand", "segment", "pack_type", "pack_qty", "size_ml", "size_g", "is_own", "bsr_med", "spearman_price_bsr"] if c in comp.columns]
     fig = px.scatter(
@@ -929,7 +926,7 @@ with tabs[6]:
         title="Mapa: Preço médio vs % dias em promo (tamanho = profundidade média em promo)",
         labels={"avg_price": "Preço médio", "promo_share": "% dias em promo"},
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width='stretch')
 
 # Tab 8
 with tabs[7]:
@@ -956,12 +953,12 @@ with tabs[7]:
             continue
 
         es = enrich_with_meta(es)
-        st.dataframe(es, use_container_width=True, hide_index=True)
+        st.dataframe(es, width='stretch', hide_index=True)
 
         fig = px.bar(es.sort_values("bsr_med_delta"), x="asin", y="bsr_med_delta",
                      title="Δ BSR mediano (janela - baseline) — negativo = melhorou")
         fig.add_hline(y=0, line_dash="dash")
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width='stretch')
 
         color_col = "is_own" if ("is_own" in es.columns and es["is_own"].notna().any()) else None
         fig2 = px.scatter(
@@ -975,7 +972,7 @@ with tabs[7]:
         )
         fig2.add_hline(y=0, line_dash="dash")
         fig2.add_vline(x=0, line_dash="dash")
-        st.plotly_chart(fig2, use_container_width=True)
+        st.plotly_chart(fig2, width='stretch')
 
 # Tab 9
 with tabs[8]:
@@ -996,19 +993,19 @@ Isso é perfeito para reuniões de categoria: você troca o filtro e o plano mud
     if len(sens_rank):
         top = sens_rank.head(5)["asin"].tolist()
         top_named = enrich_with_meta(pd.DataFrame({"asin": top})).merge(sens_rank, on="asin", how="left")
-        st.dataframe(top_named, use_container_width=True, hide_index=True)
+        st.dataframe(top_named, width='stretch', hide_index=True)
     else:
         st.info("Sem dados suficientes para ranquear sensibilidade no recorte filtrado.")
 
     st.markdown("### 2) Governança de promo (frequência e profundidade)")
     show_cols = [c for c in ["asin","sku_name","brand","segment","is_own","avg_price","promo_share_pct","avg_discount_promo_pct","bsr_med","spearman_price_bsr"] if c in gov.columns]
-    st.dataframe(gov[show_cols].sort_values("promo_share_pct", ascending=False), use_container_width=True, hide_index=True)
+    st.dataframe(gov[show_cols].sort_values("promo_share_pct", ascending=False), width='stretch', hide_index=True)
 
     st.markdown("### 3) Sugestões de ‘preço de ataque’ (preço mágico)")
     if best_prices.empty:
         st.info("Sem cálculo robusto de preço mágico no recorte filtrado (poucos buckets repetidos).")
     else:
-        st.dataframe(enrich_with_meta(best_prices), use_container_width=True, hide_index=True)
+        st.dataframe(enrich_with_meta(best_prices), width='stretch', hide_index=True)
 
     st.markdown("### 4) Checklist tático (semana)")
     st.markdown(
@@ -1025,8 +1022,8 @@ with tabs[9]:
     st.subheader("🧪 Testes")
 
     st.markdown("### Preview dados brutos")
-    st.dataframe(raw.head(10), use_container_width=True, hide_index=True)  
+    st.dataframe(raw.head(10), width='stretch', hide_index=True)  
 
-    st.dataframe(sens.head(10), use_container_width=True, hide_index=True)
+    st.dataframe(sens.head(10), width='stretch', hide_index=True)
 
 st.caption("App de análise Preço x BSR com metadata enterprise (template + mapeamento + validação + cobertura).")
