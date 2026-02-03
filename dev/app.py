@@ -99,6 +99,7 @@ def _clean_cols(df: pd.DataFrame) -> pd.DataFrame:
     df.columns = [c.strip() for c in df.columns]
     return df
 
+
 def infer_asin_from_filename(path: str) -> str:
     """
     Extrai o ASIN (Amazon Standard Identification Number) a partir do nome do arquivo.
@@ -114,6 +115,7 @@ def infer_asin_from_filename(path: str) -> str:
     m2 = re.search(r"([A-Z0-9]{10})", base)
     return m2.group(1) if m2 else base
 
+
 def parse_time_col(series: pd.Series, dayfirst=True) -> pd.Series:
     """
     Converte uma coluna para datetime. Tenta converter considerando fuso horário (UTC)
@@ -126,6 +128,7 @@ def parse_time_col(series: pd.Series, dayfirst=True) -> pd.Series:
     except Exception:
         dt = pd.to_datetime(series, errors="coerce", dayfirst=dayfirst)
     return dt
+
 
 @st.cache_data(show_spinner=False)
 def load_all(data_glob: str, dayfirst=True) -> pd.DataFrame:
@@ -164,6 +167,7 @@ def load_all(data_glob: str, dayfirst=True) -> pd.DataFrame:
     raw = pd.concat(all_dfs, ignore_index=True)
     return raw.sort_values(["asin", "date"])
 
+
 @st.cache_data(show_spinner=False)
 def make_daily(raw: pd.DataFrame) -> pd.DataFrame:
     """
@@ -195,6 +199,7 @@ def make_daily(raw: pd.DataFrame) -> pd.DataFrame:
     daily["month_dt"] = pd.to_datetime(daily["month"] + "-01")
     return daily
 
+
 def add_base_and_promo(daily: pd.DataFrame, roll_days=30, q=0.8, promo_threshold=0.05) -> pd.DataFrame:
     """
     Identifica promoções comparando o preço atual com um 'preço base'.
@@ -221,6 +226,7 @@ def add_base_and_promo(daily: pd.DataFrame, roll_days=30, q=0.8, promo_threshold
     df["price_promo"] = np.where(df["is_promo"], df["price_effective"], np.nan)
     return df
 
+
 def method_corr_pivot(df: pd.DataFrame, value_col: str, method: str, id_prod: str) -> pd.DataFrame:
     """
     Calcula a correlação de <method> entre diferentes ASINs para uma métrica 
@@ -229,7 +235,7 @@ def method_corr_pivot(df: pd.DataFrame, value_col: str, method: str, id_prod: st
 
     columns_map = {'ASIN': 'asin', 'Descrição': 'sku_name'}
     pivot = df.pivot(index="day", columns=columns_map[id_prod], values=value_col)
-    corr = pivot.corr(method=method.lower(), min_periods=60)
+    corr = pivot.corr(method=method.lower(), min_periods=30)
     corr.index.name = id_prod
     corr.columns.name = id_prod
     return corr
@@ -239,9 +245,7 @@ def scatter_corr(df: pd.DataFrame, value_col: str, id_prod: str) -> pd.DataFrame
     """
     Retorna um DataFrame com as datas e os valores de dois produtos específicos,
     filtrando apenas os dias em que AMBOS possuem dados (intersecção).
-    """
-    columns_map = {'ASIN': 'asin', 'Descrição': 'sku_name'}
-    
+    """    
     # 1. Pivotar: O índice vira 'day' e as colunas viram os produtos
     pivot = df.pivot(index="day", columns=columns_map[id_prod], values=value_col)
 
@@ -250,6 +254,43 @@ def scatter_corr(df: pd.DataFrame, value_col: str, id_prod: str) -> pd.DataFrame
     df_scatter = pivot.reset_index()
 
     return df_scatter
+
+
+def scatter_cross_corr(df: pd.DataFrame, prod1: str, prod2: str, id_prod: str) -> pd.DataFrame:
+    """
+    Retorna um DataFrame com 3 colunas:
+    1. 'day'
+    2. Coluna com nome do prod1 -> contendo PREÇO (price_effective)
+    3. Coluna com nome do prod2 -> contendo BSR (bsr)
+    
+    Apenas dias onde ambos têm dados (join='inner').
+    """
+    col_id = columns_map[id_prod] # Define se filtramos por 'asin' ou 'sku_name'
+
+    # 1. Extrair Série do Produto 1 (PREÇO)
+    # Filtra linhas do prod1 -> Define dia como índice -> Pega só o preço -> Renomeia a série para o nome do produto
+    s1 = (
+        df[df[col_id] == prod1]
+        .set_index("day")["price_effective"]
+        .rename(prod1)
+    )
+
+    # 2. Extrair Série do Produto 2 (BSR)
+    # Filtra linhas do prod2 -> Define dia como índice -> Pega só o BSR -> Renomeia
+    s2 = (
+        df[df[col_id] == prod2]
+        .set_index("day")["bsr"]
+        .rename(prod2)
+    )
+
+    # 3. Juntar as duas séries (Alinhamento temporal)
+    # axis=1: Coloca uma do lado da outra
+    # join="inner": Mantém apenas os dias que existem nas DUAS séries (intersecção)
+    combined = pd.concat([s1, s2], axis=1, join="inner")
+
+    # 4. Resetar índice para ter 'day' como coluna
+    return combined.reset_index()
+
 
 def price_vs_bsr_corr(df: pd.DataFrame, method:str, id_prod: str) -> pd.DataFrame:
     """
@@ -264,6 +305,7 @@ def price_vs_bsr_corr(df: pd.DataFrame, method:str, id_prod: str) -> pd.DataFram
         r = g[["price_effective", "bsr"]].corr(method=method.lower()).iloc[0, 1] if n >= 30 else np.nan
         out.append({"asin": asin, "spearman_price_bsr": r, "n_obs": n})
     return pd.DataFrame(out).sort_values("spearman_price_bsr", ascending=False)
+
 
 def cross_price_bsr_matrix(df: pd.DataFrame, method="spearman", id_prod='asin', min_periods=30) -> pd.DataFrame:
     """
@@ -306,10 +348,9 @@ def cross_price_bsr_matrix(df: pd.DataFrame, method="spearman", id_prod='asin', 
     cross_matrix = pd.DataFrame(matrix_data).T
     cross_matrix.index.name = "asin_price_driver"
     cross_matrix.columns.name = "asin_bsr_responder"
-
-    print(cross_matrix.head())
     
     return cross_matrix
+
 
 def price_vs_bsr_corr_kmean(df: pd.DataFrame, method:str) -> pd.DataFrame:
     """
@@ -323,6 +364,7 @@ def price_vs_bsr_corr_kmean(df: pd.DataFrame, method:str) -> pd.DataFrame:
         r = g[["price_effective", "bsr"]].corr(method=method.lower()).iloc[0, 1] if n >= 30 else np.nan
         out.append({"asin": asin, "spearman_price_bsr": r, "n_obs": n})
     return pd.DataFrame(out).sort_values("spearman_price_bsr", ascending=False)
+
 
 def elasticity_proxy(df: pd.DataFrame, asin: str, bucket_round=2, min_n=6) -> pd.DataFrame:
     """
@@ -343,6 +385,7 @@ def elasticity_proxy(df: pd.DataFrame, asin: str, bucket_round=2, min_n=6) -> pd
     b["d_log_bsr"] = b["log_bsr_med"].diff()
     b["elasticity_proxy"] = (b["d_log_bsr"] / b["d_price"]).replace([np.inf, -np.inf], np.nan)
     return b
+
 
 def sku_summary(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -369,6 +412,7 @@ def sku_summary(df: pd.DataFrame) -> pd.DataFrame:
         .reset_index()
     )
 
+
 def best_price_bucket(df: pd.DataFrame, min_n=6, bucket_round=2) -> pd.DataFrame:
     """
     Agrupa preços em 'baldes' (arredondados) para identificar em qual 
@@ -388,6 +432,7 @@ def best_price_bucket(df: pd.DataFrame, min_n=6, bucket_round=2) -> pd.DataFrame
     )
     return agg[agg["n"] >= min_n].sort_values("bsr_median")
 
+
 def build_best_prices(df: pd.DataFrame) -> pd.DataFrame:
     rows = []
     for asin, g in df.groupby("asin"):
@@ -399,6 +444,7 @@ def build_best_prices(df: pd.DataFrame) -> pd.DataFrame:
     out = pd.DataFrame(rows)
     return out.sort_values("bsr_median") if not out.empty else out
 
+
 def price_index(df: pd.DataFrame, leader_asin: str) -> pd.DataFrame:
     pivot = df.pivot(index="day", columns="asin", values="price_effective")
     if leader_asin not in pivot.columns:
@@ -407,6 +453,7 @@ def price_index(df: pd.DataFrame, leader_asin: str) -> pd.DataFrame:
     idx = pivot.divide(leader, axis=0)
     idx = idx.reset_index().melt(id_vars="day", var_name="asin", value_name="price_index")
     return idx.dropna(subset=["price_index"])
+
 
 def monthly_agg(df: pd.DataFrame) -> pd.DataFrame:
     def _avg_disc_promo(x):
@@ -648,6 +695,10 @@ def meta_filters_ui(df: pd.DataFrame) -> pd.DataFrame:
 
     return f
 
+def filter_period(df: pd.DataFrame, min_date: pd.Timestamp, max_date: pd.Timestamp) -> pd.DataFrame:
+    """Filtra o DataFrame para incluir apenas datas entre min_date e max_date (inclusivo)."""
+    return df[(df["day"] >= min_date) & (df["day"] <= max_date)]
+
 
 # ----------------------------
 # Streamlit UI
@@ -661,11 +712,11 @@ with st.sidebar:
     data_glob = st.text_input("DATA_GLOB (caminho/curinga dos CSVs)", value=DEFAULT_DATA_GLOB)
     dayfirst = st.toggle("Datas no formato dia/mês (dayfirst)", value=True)
 
-    st.subheader("📎 Metadata (enterprise)")
-    st.caption("Upload de CSV + validação + template para baixar.")
-    meta_file = st.file_uploader("Upload metadata CSV", type=["csv"])
+    st.subheader("📅 Controles de Data")
+    min_date = st.date_input("Data inicial mínima", value=pd.to_datetime("2025-01-01"))
+    max_date = st.date_input("Data final máxima", value=pd.to_datetime("today"))
 
-    st.subheader("Controles de Correlação")
+    st.subheader("📈 Controles de Correlação")
     ctl_corr = st.selectbox("Tipo de Correlação", ["Kendall", "Pearson", "Spearman"], index=2)
     ctl_prod = st.selectbox("Identificador", ["ASIN", "Descrição"], index=1)
 
@@ -698,6 +749,10 @@ with st.sidebar:
 
     st.subheader("Frequência")
     freq = st.selectbox("Granularidade principal", ["Diário", "Mensal"], index=1)
+
+    st.subheader("📎 Metadata (enterprise)")
+    st.caption("Upload de CSV + validação + template para baixar.")
+    meta_file = st.file_uploader("Upload metadata CSV", type=["csv"])
 
 # Load core data
 raw = load_all(data_glob=data_glob, dayfirst=dayfirst)
@@ -792,6 +847,7 @@ Aqui você:
         st.info("Opcional: faça upload do metadata para habilitar filtros por marca/segmento e insights contextualizados.")
 
 # Apply metadata to daily and filter
+daily = filter_period(daily, pd.to_datetime(min_date), pd.to_datetime(max_date))
 daily = apply_metadata(daily, meta)
 daily_f = meta_filters_ui(daily)
 
@@ -947,8 +1003,14 @@ with tabs[3]:
 
     fig2 = px.imshow(cross_corr, text_auto=True, aspect="auto", title=f"Correlação {ctl_corr} Cruzada (diária)")
     fig2.update_layout(yaxis_title = "Preço", xaxis_title = "BSR")
-
     st.plotly_chart(fig2, width='stretch')
+
+    cross_filtered = scatter_cross_corr(daily_f, prod_1, prod_2, ctl_prod)
+    fig2_scatter = px.scatter(cross_filtered, x=prod_2, y=prod_1,
+                             title=f"Dispersão de Preço {prod_1} vs BSR {prod_2}",
+                             labels={prod_1: "Preço", prod_2: "BSR"},
+                             hover_data={'day': '|%d/%m/%Y'})
+    st.plotly_chart(fig2_scatter, width='stretch')
     
   
     fig3 = px.imshow(price_corr, text_auto=True, aspect="auto", title=f"Correlação {ctl_corr} de preço (diária)")
@@ -960,7 +1022,7 @@ with tabs[3]:
     fig3_scatter = px.scatter(price_filtered, x=prod_1, y=prod_2,
                              title=f"Dispersão de Preço: {prod_1} vs {prod_2}",
                              labels={prod_1: f"{prod_1}", prod_2: f"{prod_2}"},
-                             hover_data={'day': ' | %d/%m/%Y'})
+                             hover_data={'day': '|%d/%m/%Y'})
     st.plotly_chart(fig3_scatter, width='stretch')
 
 
@@ -973,7 +1035,7 @@ with tabs[3]:
     fig4_scatter = px.scatter(bsr_filtered, x=prod_1, y=prod_2,
                              title=f"Dispersão de BSR: {prod_1} vs {prod_2}",
                              labels={prod_1: f"{prod_1}", prod_2: f"{prod_2}"},
-                             hover_data={'day': ' | %d/%m/%Y'})
+                             hover_data={'day': '|%d/%m/%Y'})
     st.plotly_chart(fig4_scatter, width='stretch')
 
 # Tab 5
