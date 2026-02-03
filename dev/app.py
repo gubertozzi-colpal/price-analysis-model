@@ -27,7 +27,7 @@ from sklearn.cluster import KMeans
 # ----------------------------
 # Constants / Defaults
 # ----------------------------
-DEFAULT_DATA_GLOB = "./data/*-bsr-1y*.csv"
+DEFAULT_DATA_GLOB = "./dev/data/*-bsr-1y*.csv"
 TZ = "America/Sao_Paulo"
 
 DEFAULT_EVENTS = [
@@ -71,21 +71,35 @@ CANONICAL_MAP_CANDIDATES = {
 # Helper functions (core)
 # ----------------------------
 def _clean_cols(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Cria uma cópia do DataFrame e remove espaços em branco extras 
+    (trim) dos nomes de todas as colunas.
+    """
     df = df.copy()
     df.columns = [c.strip() for c in df.columns]
     return df
 
-
 def infer_asin_from_filename(path: str) -> str:
+    """
+    Extrai o ASIN (Amazon Standard Identification Number) a partir do nome do arquivo.
+    Tenta primeiro um padrão específico ([ASIN]-bsr-1y) e, se não encontrar,
+    busca por qualquer sequência de 10 caracteres alfanuméricos.
+    """
     base = os.path.basename(path)
+    # Tenta casamento com o sufixo específico de BSR
     m = re.match(r"([A-Z0-9]{10})-bsr-1y", base)
     if m:
         return m.group(1)
+    # Fallback para qualquer ASIN de 10 caracteres no nome
     m2 = re.search(r"([A-Z0-9]{10})", base)
     return m2.group(1) if m2 else base
 
-
 def parse_time_col(series: pd.Series, dayfirst=True) -> pd.Series:
+    """
+    Converte uma coluna para datetime. Tenta converter considerando fuso horário (UTC)
+    e ajustando para o fuso local (variável TZ). Se falhar (ex: formatos mistos),
+    tenta uma conversão simples sem fuso.
+    """
     dt = pd.to_datetime(series, errors="coerce", dayfirst=dayfirst, utc=True)
     try:
         dt = dt.dt.tz_convert(TZ).dt.tz_localize(None)
@@ -93,9 +107,15 @@ def parse_time_col(series: pd.Series, dayfirst=True) -> pd.Series:
         dt = pd.to_datetime(series, errors="coerce", dayfirst=dayfirst)
     return dt
 
-
 @st.cache_data(show_spinner=False)
 def load_all(data_glob: str, dayfirst=True) -> pd.DataFrame:
+    """
+    Carrega múltiplos arquivos CSV baseados em um padrão de busca (glob).
+    - Extrai o ASIN do nome do arquivo.
+    - Padroniza nomes de colunas essenciais (Time, Sales Rank, etc).
+    - Converte tipos de dados e remove linhas sem data válida.
+    - Retorna um DataFrame consolidado e ordenado.
+    """
     paths = sorted(glob.glob(data_glob))
     if not paths:
         return pd.DataFrame()
@@ -106,6 +126,7 @@ def load_all(data_glob: str, dayfirst=True) -> pd.DataFrame:
         asin = infer_asin_from_filename(p)
         df["asin"] = asin
 
+        # Mapeamento para nomes internos padronizados
         col_map = {"Time": "time_raw", "Sales Rank": "bsr", "New Price": "price_new", "List Price": "price_list"}
         for src, dst in col_map.items():
             if src in df.columns:
@@ -123,9 +144,14 @@ def load_all(data_glob: str, dayfirst=True) -> pd.DataFrame:
     raw = pd.concat(all_dfs, ignore_index=True)
     return raw.sort_values(["asin", "date"])
 
-
 @st.cache_data(show_spinner=False)
 def make_daily(raw: pd.DataFrame) -> pd.DataFrame:
+    """
+    Transforma dados intra-diários em registros diários.
+    - Pega o último valor registrado de preço e BSR no dia.
+    - Define o 'price_effective' priorizando o preço novo sobre o preço de lista.
+    - Cria colunas auxiliares de mês para agrupamentos temporais.
+    """
     if raw.empty:
         return raw
 
@@ -137,8 +163,10 @@ def make_daily(raw: pd.DataFrame) -> pd.DataFrame:
         .agg(
             price_new=("price_new", "last"),
             price_list=("price_list", "last"),
+            price_mean=("price_new", "mean"),
+            price_array=("price_new", lambda x: x.dropna().tolist()),
             bsr=("bsr", "last"),
-            obs=("date", "count"),
+            obs=("date", "count"), # Conta quantas observações originais existiam
         )
     )
     daily["price_effective"] = daily["price_new"].fillna(daily["price_list"])
@@ -147,14 +175,22 @@ def make_daily(raw: pd.DataFrame) -> pd.DataFrame:
     daily["month_dt"] = pd.to_datetime(daily["month"] + "-01")
     return daily
 
-
 def add_base_and_promo(daily: pd.DataFrame, roll_days=30, q=0.8, promo_threshold=0.05) -> pd.DataFrame:
+    """
+    Identifica promoções comparando o preço atual com um 'preço base'.
+    - O preço base é calculado usando um quantil móvel (rolling quantile) de 30 dias.
+    - Se o desconto em relação à base for >= threshold (ex: 5%), é marcado como promo.
+    """
     df = daily.sort_values(["asin", "day"]).copy()
 
+    # Gu: Entender como calcula por produto o preço base.
     def _base(g):
         s = g["price_effective"]
+        # 1. Janela Móvel (Rolling)
         base_roll = s.rolling(roll_days, min_periods=max(10, roll_days // 3)).quantile(q)
+        # 2. Janela Expansiva (Expanding) - O "Fallback"
         base_expand = s.expanding(min_periods=10).quantile(q)
+        # 3. Combinação
         g["price_base"] = base_roll.fillna(base_expand)
         return g
 
@@ -165,26 +201,69 @@ def add_base_and_promo(daily: pd.DataFrame, roll_days=30, q=0.8, promo_threshold
     df["price_promo"] = np.where(df["is_promo"], df["price_effective"], np.nan)
     return df
 
-
 def spearman_corr_pivot(df: pd.DataFrame, value_col: str) -> pd.DataFrame:
+    """
+    Calcula a correlação de Spearman entre diferentes ASINs para uma métrica 
+    específica (ex: preço), pivotando a tabela para ter ASINs como colunas.
+    """
     pivot = df.pivot(index="day", columns="asin", values=value_col)
     corr = pivot.corr(method="spearman", min_periods=60)
     corr.index.name = "asin"
     corr.columns.name = "asin"
     return corr
 
+def pearson_corr_pivot(df: pd.DataFrame, value_col: str) -> pd.DataFrame:
+    """
+    Calcula a correlação de Pearson entre diferentes ASINs para uma métrica 
+    específica (ex: preço), pivotando a tabela para ter ASINs como colunas.
+    """
+    pivot = df.pivot(index="day", columns="asin", values=value_col)
+    corr = pivot.corr(method="pearson", min_periods=60)
+    corr.index.name = "asin"
+    corr.columns.name = "asin"
+    return corr
 
 def price_vs_bsr_corr(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Calcula a correlação entre Preço e BSR (Sales Rank) para cada produto.
+    Ajuda a entender se a queda de preço melhora o ranking (correlação positiva).
+    """
     out = []
     for asin, g in df.groupby("asin"):
         n = g[["price_effective", "bsr"]].dropna().shape[0]
+        # Exige ao menos 30 dias de dados para ser estatisticamente relevante
         r = g[["price_effective", "bsr"]].corr(method="spearman").iloc[0, 1] if n >= 30 else np.nan
         out.append({"asin": asin, "spearman_price_bsr": r, "n_obs": n})
     return pd.DataFrame(out).sort_values("spearman_price_bsr", ascending=False)
 
+def elasticity_proxy(df: pd.DataFrame, asin: str, bucket_round=2, min_n=6) -> pd.DataFrame:
+    """
+    Tenta estimar a elasticidade preço-demanda (usando BSR como proxy de vendas).
+    Calcula a variação do log do BSR em relação à variação do preço.
+    """
+    g = df[df["asin"] == asin].copy()
+    if g.empty:
+        return pd.DataFrame()
+
+    b = best_price_bucket(g, min_n=min_n, bucket_round=bucket_round)
+    if b.empty:
+        return b
+
+    b = b.copy().sort_values("price_bucket")
+    b["log_bsr_med"] = np.log(b["bsr_median"].clip(lower=1))
+    b["d_price"] = b["price_bucket"].diff()
+    b["d_log_bsr"] = b["log_bsr_med"].diff()
+    b["elasticity_proxy"] = (b["d_log_bsr"] / b["d_price"]).replace([np.inf, -np.inf], np.nan)
+    return b
+
 
 def sku_summary(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Gera um resumo estatístico consolidado por SKU (ASIN).
+    Inclui médias de preço, share de promoção e BSR mediano.
+    """
     def _avg_discount_promo(x):
+        # Média de desconto apenas quando o item estava em promoção
         xp = x[df.loc[x.index, "is_promo"]]
         return xp.mean() if len(xp) else np.nan
 
@@ -203,8 +282,11 @@ def sku_summary(df: pd.DataFrame) -> pd.DataFrame:
         .reset_index()
     )
 
-
 def best_price_bucket(df: pd.DataFrame, min_n=6, bucket_round=2) -> pd.DataFrame:
+    """
+    Agrupa preços em 'baldes' (arredondados) para identificar em qual 
+    faixa de preço o BSR tende a ser melhor (menor).
+    """
     g = df.copy()
     g["price_bucket"] = g["price_effective"].round(bucket_round)
     agg = (
@@ -274,24 +356,6 @@ def competitive_map(df: pd.DataFrame, k=4, random_state=42) -> pd.DataFrame:
     km = KMeans(n_clusters=k, n_init="auto", random_state=random_state)
     feat["cluster"] = km.fit_predict(Xs)
     return feat
-
-
-def elasticity_proxy(df: pd.DataFrame, asin: str, bucket_round=2, min_n=6) -> pd.DataFrame:
-    g = df[df["asin"] == asin].copy()
-    if g.empty:
-        return pd.DataFrame()
-
-    b = best_price_bucket(g, min_n=min_n, bucket_round=bucket_round)
-    if b.empty:
-        return b
-
-    b = b.copy().sort_values("price_bucket")
-    b["log_bsr_med"] = np.log(b["bsr_median"].clip(lower=1))
-    b["d_price"] = b["price_bucket"].diff()
-    b["d_log_bsr"] = b["log_bsr_med"].diff()
-    b["elasticity_proxy"] = (b["d_log_bsr"] / b["d_price"]).replace([np.inf, -np.inf], np.nan)
-    return b
-
 
 def event_summary(df: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp, baseline_days=14, pre=7, post=7) -> pd.DataFrame:
     win_start, win_end = start - pd.Timedelta(days=pre), end + pd.Timedelta(days=post)
@@ -503,6 +567,10 @@ with st.sidebar:
     data_glob = st.text_input("DATA_GLOB (caminho/curinga dos CSVs)", value=DEFAULT_DATA_GLOB)
     dayfirst = st.toggle("Datas no formato dia/mês (dayfirst)", value=True)
 
+    #st.subheader("Controle de Correlação")
+    #ctl_corr = st.selectbox("Tipo de Correlação", ["Pearson", "Spearmann"], index=1)
+    #ctl_prod = st.selectbox("Tipo de Descrição", ["ASIN", "Descrição"], index=1)
+
     st.subheader("Separação Base vs Promo")
     roll_days = st.slider("Janela base (dias)", 14, 60, 30, 1)
     base_q = st.slider("Quantil para base (p80 recomendado)", 0.6, 0.95, 0.8, 0.05)
@@ -577,7 +645,7 @@ Aqui você:
         loaded = None
         for enc in ["utf-8", "utf-8-sig", "latin1"]:
             try:
-                loaded = pd.read_csv(BytesIO(file_bytes), encoding=enc)
+                loaded = pd.read_csv(BytesIO(file_bytes), encoding=enc, sep=';')
                 break
             except Exception:
                 continue
@@ -625,7 +693,7 @@ Aqui você:
                     st.caption("ASINs no metadata que não estão no dataset (até 50): " + ", ".join(cov["extra_list"]))
 
             st.markdown("**2) Preview do metadata (após mapeamento/limpeza)**")
-            st.dataframe(meta.head(50), use_container_width=True, hide_index=True)
+            st.dataframe(meta.head(50), width='stretch', hide_index=True)
     else:
         st.info("Opcional: faça upload do metadata para habilitar filtros por marca/segmento e insights contextualizados.")
 
@@ -654,6 +722,7 @@ pages = [
     "Mapa Competitivo (clusters)",
     "Playbook de Eventos (Prime/Black/etc.)",
     "Recomendações (Tático & Estratégico)",
+    "testes",
 ]
 tabs = st.tabs(pages)
 
@@ -749,6 +818,14 @@ with tabs[3]:
 **Estratégico:** formar “grupos competitivos” por faixa/segmento.
         """
     )
+
+    col1, col2 = st.columns(2)
+    with col1:
+        ctl_corr = st.selectbox("Tipo de Correlação", ["Pearson", "Spearmann"], index=1)
+
+    with col2:
+        ctl_prod = st.selectbox("Tipo de Descrição", ["ASIN", "Descrição"], index=1)
+
 
     fig = px.imshow(price_corr, text_auto=True, aspect="auto", title="Correlação Spearman de preço (diária)")
     st.plotly_chart(fig, use_container_width=True)
@@ -942,5 +1019,14 @@ Isso é perfeito para reuniões de categoria: você troca o filtro e o plano mud
 - **Evitar over-promo:** se promo_share sobe e BSR não melhora, pare e reavalie (provável driver fora de preço).
         """
     )
+
+# Tab 10
+with tabs[9]:
+    st.subheader("🧪 Testes")
+
+    st.markdown("### Preview dados brutos")
+    st.dataframe(raw.head(10), use_container_width=True, hide_index=True)  
+
+    st.dataframe(sens.head(10), use_container_width=True, hide_index=True)
 
 st.caption("App de análise Preço x BSR com metadata enterprise (template + mapeamento + validação + cobertura).")
