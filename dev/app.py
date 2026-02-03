@@ -35,6 +35,8 @@ DEFAULT_EVENTS = [
     {"name": "Black Friday 2025", "start": "2025-11-28", "end": "2025-11-28"},
 ]
 
+columns_map = {'ASIN': 'asin', 'Descrição': 'sku_name'}
+
 # Recommended metadata schema (template)
 TEMPLATE_COLS = [
     "asin",          # REQUIRED
@@ -66,6 +68,24 @@ CANONICAL_MAP_CANDIDATES = {
     "ean": ["ean", "EAN", "gtin", "GTIN", "barcode", "codigo_barras"],
     "notes": ["notes", "obs", "observacao", "observações", "comment", "comentario"],
 }
+
+# ----------------------------
+# Style CSS
+# ----------------------------
+
+st.markdown("""
+    <style>
+        /* Ajusta o padding inferior do container principal */
+        .main .block-container {
+            padding-bottom: 5rem; 
+        }
+        
+        /* Opcional: Se o rodapé estiver atrapalhando, você pode escondê-lo */
+        footer {
+            visibility: hidden;
+        }
+    </style>
+""", unsafe_allow_html=True)
 
 # ----------------------------
 # Helper functions (core)
@@ -214,6 +234,23 @@ def method_corr_pivot(df: pd.DataFrame, value_col: str, method: str, id_prod: st
     corr.columns.name = id_prod
     return corr
 
+
+def scatter_corr(df: pd.DataFrame, value_col: str, id_prod: str) -> pd.DataFrame:
+    """
+    Retorna um DataFrame com as datas e os valores de dois produtos específicos,
+    filtrando apenas os dias em que AMBOS possuem dados (intersecção).
+    """
+    columns_map = {'ASIN': 'asin', 'Descrição': 'sku_name'}
+    
+    # 1. Pivotar: O índice vira 'day' e as colunas viram os produtos
+    pivot = df.pivot(index="day", columns=columns_map[id_prod], values=value_col)
+
+    # 2. Selecionar e Resetar Índice
+    # Selecionamos as duas colunas e usamos reset_index para que 'day' volte a ser uma coluna
+    df_scatter = pivot.reset_index()
+
+    return df_scatter
+
 def price_vs_bsr_corr(df: pd.DataFrame, method:str, id_prod: str) -> pd.DataFrame:
     """
     Calcula a correlação entre Preço e BSR (Sales Rank) para cada produto.
@@ -269,6 +306,8 @@ def cross_price_bsr_matrix(df: pd.DataFrame, method="spearman", id_prod='asin', 
     cross_matrix = pd.DataFrame(matrix_data).T
     cross_matrix.index.name = "asin_price_driver"
     cross_matrix.columns.name = "asin_bsr_responder"
+
+    print(cross_matrix.head())
     
     return cross_matrix
 
@@ -304,7 +343,6 @@ def elasticity_proxy(df: pd.DataFrame, asin: str, bucket_round=2, min_n=6) -> pd
     b["d_log_bsr"] = b["log_bsr_med"].diff()
     b["elasticity_proxy"] = (b["d_log_bsr"] / b["d_price"]).replace([np.inf, -np.inf], np.nan)
     return b
-
 
 def sku_summary(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -350,7 +388,6 @@ def best_price_bucket(df: pd.DataFrame, min_n=6, bucket_round=2) -> pd.DataFrame
     )
     return agg[agg["n"] >= min_n].sort_values("bsr_median")
 
-
 def build_best_prices(df: pd.DataFrame) -> pd.DataFrame:
     rows = []
     for asin, g in df.groupby("asin"):
@@ -362,7 +399,6 @@ def build_best_prices(df: pd.DataFrame) -> pd.DataFrame:
     out = pd.DataFrame(rows)
     return out.sort_values("bsr_median") if not out.empty else out
 
-
 def price_index(df: pd.DataFrame, leader_asin: str) -> pd.DataFrame:
     pivot = df.pivot(index="day", columns="asin", values="price_effective")
     if leader_asin not in pivot.columns:
@@ -371,7 +407,6 @@ def price_index(df: pd.DataFrame, leader_asin: str) -> pd.DataFrame:
     idx = pivot.divide(leader, axis=0)
     idx = idx.reset_index().melt(id_vars="day", var_name="asin", value_name="price_index")
     return idx.dropna(subset=["price_index"])
-
 
 def monthly_agg(df: pd.DataFrame) -> pd.DataFrame:
     def _avg_disc_promo(x):
@@ -389,7 +424,6 @@ def monthly_agg(df: pd.DataFrame) -> pd.DataFrame:
             discount=("discount_pct", _avg_disc_promo),
         )
     )
-
 
 def competitive_map(df: pd.DataFrame, k=4, random_state=42) -> pd.DataFrame:
     """
@@ -627,7 +661,11 @@ with st.sidebar:
     data_glob = st.text_input("DATA_GLOB (caminho/curinga dos CSVs)", value=DEFAULT_DATA_GLOB)
     dayfirst = st.toggle("Datas no formato dia/mês (dayfirst)", value=True)
 
-    st.subheader("Controle de Correlação")
+    st.subheader("📎 Metadata (enterprise)")
+    st.caption("Upload de CSV + validação + template para baixar.")
+    meta_file = st.file_uploader("Upload metadata CSV", type=["csv"])
+
+    st.subheader("Controles de Correlação")
     ctl_corr = st.selectbox("Tipo de Correlação", ["Kendall", "Pearson", "Spearman"], index=2)
     ctl_prod = st.selectbox("Identificador", ["ASIN", "Descrição"], index=1)
 
@@ -660,10 +698,6 @@ with st.sidebar:
 
     st.subheader("Frequência")
     freq = st.selectbox("Granularidade principal", ["Diário", "Mensal"], index=1)
-
-    st.subheader("📎 Metadata (enterprise)")
-    st.caption("Upload de CSV + validação + template para baixar.")
-    meta_file = st.file_uploader("Upload metadata CSV", type=["csv"])
 
 # Load core data
 raw = load_all(data_glob=data_glob, dayfirst=dayfirst)
@@ -770,6 +804,8 @@ monthly = monthly_agg(daily_f)
 price_corr = method_corr_pivot(daily_f, "price_effective",ctl_corr, ctl_prod)
 bsr_corr = method_corr_pivot(daily_f, "bsr",ctl_corr, ctl_prod)
 cross_corr = cross_price_bsr_matrix(daily_f, ctl_corr, ctl_prod)
+scatter_price = scatter_corr(daily_f, value_col="price_effective", id_prod=ctl_prod)
+scatter_bsr = scatter_corr(daily_f, value_col="bsr", id_prod=ctl_prod)
 asins = sorted(daily_f["asin"].unique().tolist())
 
 # Tabs
@@ -777,7 +813,7 @@ pages = [
     "Visão Geral",
     "Evolução (Preço/BSR)",
     "Base vs Promo + Profundidade",
-    "Correlação + Quem compete com quem",
+    "Correlação",
     "Índice de Preço (Price Index)",
     "Preço mágico + Elasticidade (proxy)",
     "Mapa Competitivo (clusters)",
@@ -880,31 +916,65 @@ with tabs[3]:
         """
     )
 
-    fig = px.imshow(price_corr, text_auto=True, aspect="auto", title=f"Correlação {ctl_corr} de preço (diária)")
-    st.plotly_chart(fig, width='stretch')
+    options_full = sorted(daily_f[columns_map[ctl_prod]].dropna().unique().tolist())
+    
+    col1, col2 = st.columns(2)
 
-    fig2 = px.imshow(bsr_corr, text_auto=True, aspect="auto", title=f"Correlação {ctl_corr} de BSR (diária)")
-    st.plotly_chart(fig2, width='stretch')
+    with col1:
+        # O primeiro controle mostra tudo
+        prod_1 = st.selectbox(f"Produto A ({ctl_prod})", options=options_full)
 
-    fig3 = px.imshow(cross_corr, text_auto=True, aspect="auto", title=f"Correlação {ctl_corr} Cruzada (diária)")
-    st.plotly_chart(fig3, width='stretch')
+    with col2:
+        # 3. A Mágica: Cria uma nova lista EXCLUINDO o que foi selecionado no prod_1
+        options_filtered = [p for p in options_full if p != prod_1]
+    
+        # O segundo controle usa a lista filtrada
+        prod_2 = st.selectbox(f"Produto B ({ctl_prod})", options=options_filtered)
 
-    fig4 = px.bar(sens.sort_values("spearman_price_bsr", ascending=False),
+    fig1 = px.bar(sens.sort_values("spearman_price_bsr", ascending=False),
                   x="asin", y="spearman_price_bsr",
                   title=f"Sensibilidade: {ctl_corr}(Preço, BSR)",
                   labels={"spearman_price_bsr": "Sensibilidade",
                           "asin": "Produto"})
     
-    fig4.update_traces(texttemplate="%{y:.4f}", 
+    fig1.update_traces(texttemplate="%{y:.4f}", 
                        textposition="inside")
     
-    fig4.update_layout(uniformtext_minsize=12, 
+    fig1.update_layout(uniformtext_minsize=12, 
                        uniformtext_mode='hide')
+    st.plotly_chart(fig1, width='stretch')
+
+
+    fig2 = px.imshow(cross_corr, text_auto=True, aspect="auto", title=f"Correlação {ctl_corr} Cruzada (diária)")
+    fig2.update_layout(yaxis_title = "Preço", xaxis_title = "BSR")
+
+    st.plotly_chart(fig2, width='stretch')
     
+  
+    fig3 = px.imshow(price_corr, text_auto=True, aspect="auto", title=f"Correlação {ctl_corr} de preço (diária)")
+    st.plotly_chart(fig3, width='stretch')
+
+    # Filtrar NaNs: dropna no subset dos dois produtos
+    # Isso garante que só sobram dias onde prod_1 E prod_2 têm valores
+    price_filtered = scatter_price.dropna(subset=[prod_1, prod_2])
+    fig3_scatter = px.scatter(price_filtered, x=prod_1, y=prod_2,
+                             title=f"Dispersão de Preço: {prod_1} vs {prod_2}",
+                             labels={prod_1: f"{prod_1}", prod_2: f"{prod_2}"},
+                             hover_data={'day': ' | %d/%m/%Y'})
+    st.plotly_chart(fig3_scatter, width='stretch')
 
 
-
+    fig4 = px.imshow(bsr_corr, text_auto=True, aspect="auto", title=f"Correlação {ctl_corr} de BSR (diária)")
     st.plotly_chart(fig4, width='stretch')
+
+    # Filtrar NaNs: dropna no subset dos dois produtos
+    # Isso garante que só sobram dias onde prod_1 E prod_2 têm valores
+    bsr_filtered = scatter_bsr.dropna(subset=[prod_1, prod_2])
+    fig4_scatter = px.scatter(bsr_filtered, x=prod_1, y=prod_2,
+                             title=f"Dispersão de BSR: {prod_1} vs {prod_2}",
+                             labels={prod_1: f"{prod_1}", prod_2: f"{prod_2}"},
+                             hover_data={'day': ' | %d/%m/%Y'})
+    st.plotly_chart(fig4_scatter, width='stretch')
 
 # Tab 5
 with tabs[4]:
