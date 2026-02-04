@@ -881,7 +881,7 @@ asins = sorted(daily_f["asin"].unique().tolist())
 pages = [
     "Visão Geral",
     "Evolução",
-    "Base vs Promo + Profundidade",
+    "Detalhado",
     "Correlação",
     "Índice de Preço (Price Index)",
     "Preço mágico + Elasticidade (proxy)",
@@ -916,6 +916,7 @@ with tabs[0]:
     )
 
     st.dataframe(enrich_with_meta(summ2).sort_values("bsr_med"), width='stretch', hide_index=True)
+
 
 # Tab 2
 with tabs[1]:
@@ -968,22 +969,6 @@ with tabs[1]:
                        color=columns_map[ctl_prod],
                        markers=True, title="Desconto lista (quando em promoção)")
         st.plotly_chart(fig4, width='stretch')
-
-
-        fig5 = px.bar(monthly_figs.sort_values("month_dt"), x="month_dt", y="bsr")
-        fig5.add_scatter(x=monthly_figs["month_dt"], y=monthly_figs["price"], 
-                         mode="lines+markers", name="Preço médio", yaxis="y2")
-        
-        fig5.add_scatter(x=monthly_figs["month_dt"], y=monthly_figs["base"], 
-                         mode="lines+markers", name="Preço base", yaxis="y2")
-        
-        fig5.add_scatter(x=monthly_figs["month_dt"], y=monthly_figs["list"], 
-                         mode="lines+markers", name="Preço lista", yaxis="y2")
-        
-        fig5.update_layout(title="Evolução mensal de BSR e Preço", xaxis_title="Mês", 
-                           yaxis_title="BSR mediano", yaxis2=dict(title="Preço médio", 
-                           overlaying='y', side='right'))
-        st.plotly_chart(fig5, width='stretch')
 
         st.download_button("📥 Baixar dados filtrados (CSV)", data=to_csv_bytes(monthly), 
                            file_name="amazon_price_bsr_monthly.csv", mime="text/csv")
@@ -1039,32 +1024,99 @@ with tabs[1]:
 # Tab 3
 with tabs[2]:
     st.subheader("🏷️ Base vs Promo – Rebaixa e Profundidade")
-    st.markdown(
-        """
-**Tático:** calibrar profundidade mínima que melhora BSR.  
-**Estratégico:** limitar frequência promocional por segmento (evitar destruição do base).
-        """
-    )
+    with st.expander("📄 Instruções de uso", expanded=False):
+        st.markdown(
+            """
+    **Tático:** calibrar profundidade mínima que melhora BSR.  
+    **Estratégico:** limitar frequência promocional por segmento (evitar destruição do base).
+            """
+        )
 
-    a = st.selectbox("SKU para detalhar", options=asins, index=0)
-    g = daily_f[daily_f["asin"] == a].copy()
-    title_name = g["sku_name"].iloc[0] if ("sku_name" in g.columns and len(g)) else a
+    options_full = sorted(daily_f[columns_map[ctl_prod]].dropna().unique().tolist())
 
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=g["day"], y=g["price_effective"], mode="lines", name="Preço efetivo"))
-    fig.add_trace(go.Scatter(x=g["day"], y=g["price_base"], mode="lines", name="Preço base"))
-    fig.update_layout(title=f"Preço efetivo vs Base – {title_name}", xaxis_title="Dia", yaxis_title="Preço (R$)")
-    st.plotly_chart(fig, width='stretch')
+    a = st.selectbox(f"Selecione {ctl_prod}", options=options_full, index=0)
 
-    fig2 = px.scatter(g, x="discount_pct", y="bsr", color="is_promo",
-                      title=f"Profundidade (vs base) x BSR – {title_name}",
-                      labels={"discount_pct": "Desconto vs base", "bsr": "BSR"})
-    st.plotly_chart(fig2, width='stretch')
+    g = daily_f[daily_f[columns_map[ctl_prod]] == a].copy()
 
-    promo_depth = daily_f[daily_f["is_promo"]].copy()
-    fig3 = px.box(promo_depth, x="asin", y=promo_depth["discount_pct"] * 100,
-                  title="Distribuição de profundidade promocional (% vs base)", labels={"y": "% desconto vs base"})
-    st.plotly_chart(fig3, width='stretch')
+    if freq == "Mensal":
+
+        g = g.groupby(["month", "month_dt"], as_index=False).agg(
+            price_effective=("price_effective", "median"),
+            price_base=("price_base", "median"),
+            price_list=("price_list", "median"),
+            discount_pct=("discount_pct", "median"),
+            discount_list_pct=("discount_list_pct", "median"),
+            bsr=("bsr", "median"),
+        )
+
+        fig5 = px.bar(g.sort_values("month_dt"), x="month_dt", y="bsr")
+        fig5.add_scatter(x=g["month_dt"], y=g["price_effective"], 
+                         mode="lines+markers", name="Preço executado", yaxis="y2")
+        
+        fig5.add_scatter(x=g["month_dt"], y=g["price_base"], 
+                         mode="lines+markers", name="Preço base", yaxis="y2")
+        
+        fig5.add_scatter(x=g["month_dt"], y=g["price_list"], 
+                         mode="lines+markers", name="Preço lista", yaxis="y2")
+        
+        fig5.update_layout(title="Evolução mensal de BSR e Preço", xaxis_title="Mês", 
+                           yaxis_title="BSR mediano", yaxis2=dict(title="Preço médio", 
+                           overlaying='y', side='right'))
+        st.plotly_chart(fig5, width='stretch', key='fig5_deta')
+        
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=g["month_dt"], y=g["price_effective"], mode="lines", name="Preço efetivo"))
+        fig.add_trace(go.Scatter(x=g["month_dt"], y=g["price_base"], mode="lines", name="Preço base"))
+        fig.add_trace(go.Scatter(x=g["month_dt"], y=g["price_list"], mode="lines", name="Preço lista"))
+        fig.update_layout(title=f"Preço efetivo vs Base vs Lista - {a}", 
+                          xaxis_title="Mês", yaxis_title="Preço")
+        st.plotly_chart(fig, width='stretch')
+
+        fig2 = go.Figure()
+        fig2.add_trace(go.Scatter(x=g["month_dt"], y=g["discount_pct"], mode="lines", name="Desconto base"))
+        fig2.add_trace(go.Scatter(x=g["month_dt"], y=g["discount_list_pct"], mode="lines", name="Desconto lista"))
+        fig2.update_layout(title=f"Desconto Base vs Lista - {a}", 
+                          xaxis_title="Mês", yaxis_title="Desconto")
+        st.plotly_chart(fig2, width='stretch')
+
+        st.download_button("📥 Baixar dados filtrados (CSV)", data=to_csv_bytes(g),
+                           file_name=f'amazon_price_bsr_monthly_{a}.csv', mime="text/csv")
+
+
+    else:
+        fig5 = px.bar(g.sort_values("day"), x="day", y="bsr")
+        fig5.add_scatter(x=g["day"], y=g["price_effective"], 
+                         mode="lines+markers", name="Preço executado", yaxis="y2")
+        
+        fig5.add_scatter(x=g["day"], y=g["price_base"], 
+                         mode="lines+markers", name="Preço base", yaxis="y2")
+        
+        fig5.add_scatter(x=g["day"], y=g["price_list"], 
+                         mode="lines+markers", name="Preço lista", yaxis="y2")
+        
+        fig5.update_layout(title="Evolução mensal de BSR e Preço", xaxis_title="Dia", 
+                           yaxis_title="BSR mediano", yaxis2=dict(title="Preço médio", 
+                           overlaying='y', side='right'))
+        st.plotly_chart(fig5, width='stretch', key='fig5_deta')
+        
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=g["day"], y=g["price_effective"], mode="lines", name="Preço efetivo"))
+        fig.add_trace(go.Scatter(x=g["day"], y=g["price_base"], mode="lines", name="Preço base"))
+        fig.add_trace(go.Scatter(x=g["day"], y=g["price_list"], mode="lines", name="Preço lista"))
+        fig.update_layout(title=f"Preço efetivo vs Base vs Lista - {a}", 
+                          xaxis_title="Dia", yaxis_title="Preço")
+        st.plotly_chart(fig, width='stretch')
+
+        fig2 = go.Figure()
+        fig2.add_trace(go.Scatter(x=g["day"], y=g["discount_pct"], mode="lines", name="Desconto base"))
+        fig2.add_trace(go.Scatter(x=g["day"], y=g["discount_list_pct"], mode="lines", name="Desconto lista"))
+        fig2.update_layout(title=f"Desconto Base vs Lista - {a}", 
+                          xaxis_title="Dia", yaxis_title="Desconto")
+        st.plotly_chart(fig2, width='stretch')
+
+        st.download_button("📥 Baixar dados filtrados (CSV)", data=to_csv_bytes(g),
+                           file_name=f'amazon_price_bsr_daly_{a}.csv', mime="text/csv")
+
 
 # Tab 4
 with tabs[3]:
@@ -1297,6 +1349,7 @@ with tabs[3]:
 
     st.plotly_chart(fig4_scatter, width='stretch', config=config_export, key='teste_scatter_4')
 
+
 # Tab 5
 with tabs[4]:
     st.subheader("📌 Índice de Preço (Price Index)")
@@ -1334,6 +1387,7 @@ with tabs[4]:
             fig.add_hline(y=1.0, line_dash="dash", annotation_text="Referência = 1.0")
             st.plotly_chart(fig, width='stretch')
 
+
 # Tab 6
 with tabs[5]:
     st.subheader("✨ Preço mágico + Elasticidade (proxy)")
@@ -1363,6 +1417,7 @@ with tabs[5]:
                       title=f"Elasticidade (proxy) – {title_name} (Δlog(BSR)/Δpreço)")
         st.plotly_chart(fig2, width='stretch')
 
+
 # Tab 7
 with tabs[6]:
     st.subheader("🗺️ Mapa Competitivo (clusters) – enriquecido com metadata")
@@ -1389,6 +1444,7 @@ with tabs[6]:
         labels={"avg_price": "Preço médio", "promo_share": "% dias em promo"},
     )
     st.plotly_chart(fig, width='stretch')
+
 
 # Tab 8
 with tabs[7]:
@@ -1436,6 +1492,7 @@ with tabs[7]:
         fig2.add_vline(x=0, line_dash="dash")
         st.plotly_chart(fig2, width='stretch')
 
+
 # Tab 9
 with tabs[8]:
     st.subheader("🧠 Recomendações (Tático & Estratégico) – contextualizadas")
@@ -1479,9 +1536,20 @@ Isso é perfeito para reuniões de categoria: você troca o filtro e o plano mud
         """
     )
 
+
 # Tab 10 - Teste
 with tabs[9]:
     st.subheader("🧪 Testes")
+
+    fig2 = px.scatter(g, x="discount_pct", y="bsr", color="is_promo",
+                      title=f"Profundidade (vs base) x BSR – {a}",
+                      labels={"discount_pct": "Desconto vs base", "bsr": "BSR"})
+    st.plotly_chart(fig2, width='stretch')
+
+    promo_depth = daily_f[daily_f["is_promo"]].copy()
+    fig3 = px.box(promo_depth, x="asin", y=promo_depth["discount_pct"] * 100,
+                  title="Distribuição de profundidade promocional (% vs base)", labels={"y": "% desconto vs base"})
+    st.plotly_chart(fig3, width='stretch')
 
 
 st.caption("App de análise Preço x BSR com metadata enterprise (template + mapeamento + validação + cobertura).")
