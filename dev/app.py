@@ -470,7 +470,6 @@ def monthly_agg(df: pd.DataFrame) -> pd.DataFrame:
     def _avg_disc_promo(x):
         xp = x[df.loc[x.index, "is_promo"]]
         return xp.mean() if len(xp) else np.nan
-    print(df.head())
 
     return (
         df.groupby(["asin", "sku_name", "month", "month_dt"], as_index=False)
@@ -1054,10 +1053,10 @@ with tabs[2]:
         st.plotly_chart(fig, width='stretch')
 
         fig2 = go.Figure()
-        fig2.add_trace(go.Scatter(x=g["month_dt"], y=g["discount_pct"], mode="lines", name="Desconto base"))
-        fig2.add_trace(go.Scatter(x=g["month_dt"], y=g["discount_list_pct"], mode="lines", name="Desconto lista"))
+        fig2.add_trace(go.Scatter(x=g["month_dt"], y=g["discount_pct"]*100, mode="lines", name="Desconto base"))
+        fig2.add_trace(go.Scatter(x=g["month_dt"], y=g["discount_list_pct"]*100, mode="lines", name="Desconto lista"))
         fig2.update_layout(title=f"Desconto Base vs Lista - {a}", 
-                          xaxis_title="Mês", yaxis_title="Desconto")
+                          xaxis_title="Mês", yaxis_title="Desconto (%)")
         st.plotly_chart(fig2, width='stretch')
 
         st.download_button("📥 Baixar dados filtrados (CSV)", data=to_csv_bytes(g),
@@ -1089,10 +1088,10 @@ with tabs[2]:
         st.plotly_chart(fig, width='stretch')
 
         fig2 = go.Figure()
-        fig2.add_trace(go.Scatter(x=g["day"], y=g["discount_pct"], mode="lines", name="Desconto base"))
-        fig2.add_trace(go.Scatter(x=g["day"], y=g["discount_list_pct"], mode="lines", name="Desconto lista"))
+        fig2.add_trace(go.Scatter(x=g["day"], y=g["discount_pct"]*100, mode="lines", name="Desconto base"))
+        fig2.add_trace(go.Scatter(x=g["day"], y=g["discount_list_pct"]*100, mode="lines", name="Desconto lista"))
         fig2.update_layout(title=f"Desconto Base vs Lista - {a}", 
-                          xaxis_title="Dia", yaxis_title="Desconto")
+                          xaxis_title="Dia", yaxis_title="Desconto (%)")
         st.plotly_chart(fig2, width='stretch')
 
         st.download_button("📥 Baixar dados filtrados (CSV)", data=to_csv_bytes(g),
