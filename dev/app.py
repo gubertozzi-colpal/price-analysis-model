@@ -231,6 +231,7 @@ def add_base_and_promo(daily: pd.DataFrame, roll_days=30, q=0.8, promo_threshold
 
     df = df.groupby("asin", group_keys=False).apply(_base)
     df["discount_pct"] = (df["price_base"] - df["price_effective"]) / df["price_base"]
+    df["discount_list_pct"] = (df["price_list"] - df["price_effective"]) / df["price_list"]
     df["is_promo"] = df["discount_pct"] >= promo_threshold
     df["rebate_value"] = df["price_base"] - df["price_effective"]
     df["price_promo"] = np.where(df["is_promo"], df["price_effective"], np.nan)
@@ -469,16 +470,19 @@ def monthly_agg(df: pd.DataFrame) -> pd.DataFrame:
     def _avg_disc_promo(x):
         xp = x[df.loc[x.index, "is_promo"]]
         return xp.mean() if len(xp) else np.nan
+    print(df.head())
 
     return (
-        df.groupby(["asin", "month", "month_dt"], as_index=False)
+        df.groupby(["asin", "sku_name", "month", "month_dt"], as_index=False)
         .agg(
             price=("price_effective", "mean"),
             base=("price_base", "mean"),
+            list=("price_list", "mean"),
             bsr_med=("bsr", "median"),
             bsr_mean=("bsr", "mean"),
             promo_share=("is_promo", "mean"),
             discount=("discount_pct", _avg_disc_promo),
+            discount_list=("discount_list_pct", _avg_disc_promo),
         )
     )
 
@@ -916,19 +920,29 @@ with tabs[0]:
 # Tab 2
 with tabs[1]:
     st.subheader("📈 Evolução – Preço e BSR")
-    st.markdown(
-        """
-**Tático:** comparar preço/BSR por SKU e identificar mudanças abruptas.  
-**Estratégico:** identificar regimes de preço (padrões mensais) para governança.
-        """
-    )
+    
 
-'''
+    with st.expander("📄 Instruções de uso", expanded=False):
+        st.markdown(
+            """
+    **Tático:** comparar preço/BSR por SKU e identificar mudanças abruptas.  
+    **Estratégico:** identificar regimes de preço (padrões mensais) para governança.
+            """
+        )
+
+
     options_full = sorted(daily_f[columns_map[ctl_prod]].dropna().unique().tolist())
 
     pick = st.multiselect(f"Selecione {ctl_prod}", options=options_full, default=None)
 
     if freq == "Mensal":
+
+        if not pick:
+            monthly = monthly.copy()
+
+        else:
+            monthly = monthly[monthly[columns_map[ctl_prod]].isin(pick)].copy()
+        
         fig = px.line(monthly.sort_values("month_dt"), x="month_dt", y="price", color=columns_map[ctl_prod], 
                       markers=True, title="Preço médio mensal (price_effective)")
         st.plotly_chart(fig, width='stretch')
@@ -936,8 +950,51 @@ with tabs[1]:
         fig2 = px.line(monthly.sort_values("month_dt"), x="month_dt", y="bsr_med", color=columns_map[ctl_prod], 
                        markers=True, title="BSR mediano mensal (menor é melhor)")
         st.plotly_chart(fig2, width='stretch')
+
+        monthly_figs = monthly.groupby(["month", "month_dt"], as_index=False).agg(
+            price=("price", 'median'),
+            base=("base", 'median'),
+            list=("list", 'median'),
+            bsr=("bsr_med", "median"),
+            discount=("discount", 'median'),
+            discount_list=("discount_list", 'median'),
+        )
+
+        fig3 = px.line(monthly.sort_values("month_dt"), x="month_dt", y="discount", color=columns_map[ctl_prod],
+                       markers=True, title="Desconto base (quando em promoção)")
+        st.plotly_chart(fig3, width='stretch')
+
+        fig4 = px.line(monthly.sort_values("month_dt"), x="month_dt", y="discount_list",
+                       color=columns_map[ctl_prod],
+                       markers=True, title="Desconto lista (quando em promoção)")
+        st.plotly_chart(fig4, width='stretch')
+
+
+        fig5 = px.bar(monthly_figs.sort_values("month_dt"), x="month_dt", y="bsr")
+        fig5.add_scatter(x=monthly_figs["month_dt"], y=monthly_figs["price"], 
+                         mode="lines+markers", name="Preço médio", yaxis="y2")
+        
+        fig5.add_scatter(x=monthly_figs["month_dt"], y=monthly_figs["base"], 
+                         mode="lines+markers", name="Preço base", yaxis="y2")
+        
+        fig5.add_scatter(x=monthly_figs["month_dt"], y=monthly_figs["list"], 
+                         mode="lines+markers", name="Preço lista", yaxis="y2")
+        
+        fig5.update_layout(title="Evolução mensal de BSR e Preço", xaxis_title="Mês", 
+                           yaxis_title="BSR mediano", yaxis2=dict(title="Preço médio", 
+                           overlaying='y', side='right'))
+        st.plotly_chart(fig5, width='stretch')
+
+        st.download_button("📥 Baixar dados filtrados (CSV)", data=to_csv_bytes(monthly), 
+                           file_name="amazon_price_bsr_monthly.csv", mime="text/csv")
+
+
     else:
-        d = daily_f[daily_f["asin"].isin(pick)].copy()
+        if not pick:
+            d = daily_f.copy()
+
+        else:
+            d = daily_f[daily_f[columns_map[ctl_prod]].isin(pick)].copy()
 
         fig = px.line(d, x="day", y="price_effective", color=columns_map[ctl_prod], 
                       title="Preço efetivo diário")
@@ -946,7 +1003,38 @@ with tabs[1]:
         fig2 = px.line(d, x="day", y="bsr", color=columns_map[ctl_prod], 
                        title="BSR diário (menor é melhor)")
         st.plotly_chart(fig2, width='stretch')
-    '''
+
+
+        st.dataframe(d.head(50))
+
+        fig3 = px.line(d.sort_values("day"), x="day", y="discount_pct", color=columns_map[ctl_prod],
+                       markers=True, title="Desconto base (quando em promoção)")
+        st.plotly_chart(fig3, width='stretch')
+
+        fig4 = px.line(d.sort_values("day"), x="day", y="discount_list_pct",
+                       color=columns_map[ctl_prod],
+                       markers=True, title="Desconto lista (quando em promoção)")
+        st.plotly_chart(fig4, width='stretch')
+
+
+        fig5 = px.bar(d.sort_values("day"), x="day", y="bsr")
+        fig5.add_scatter(x=d["day"], y=d["price_effective"], 
+                         mode="lines+markers", name="Preço médio", yaxis="y2")
+        
+        fig5.add_scatter(x=d["day"], y=d["price_base"], 
+                         mode="lines+markers", name="Preço base", yaxis="y2")
+        
+        fig5.add_scatter(x=d["day"], y=d["price_list"], 
+                         mode="lines+markers", name="Preço lista", yaxis="y2")
+        
+        fig5.update_layout(title="Evolução mensal de BSR e Preço", xaxis_title="Mês", 
+                           yaxis_title="BSR mediano", yaxis2=dict(title="Preço médio", 
+                           overlaying='y', side='right'))
+        st.plotly_chart(fig5, width='stretch')
+        
+        st.download_button("📥 Baixar dados filtrados (CSV)", data=to_csv_bytes(d), 
+                           file_name="amazon_price_bsr_daily.csv", mime="text/csv")
+
 
 # Tab 3
 with tabs[2]:
