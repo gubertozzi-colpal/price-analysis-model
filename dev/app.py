@@ -989,9 +989,6 @@ with tabs[1]:
                        title="BSR diário (menor é melhor)")
         st.plotly_chart(fig2, width='stretch')
 
-
-        st.dataframe(d.head(50))
-
         fig3 = px.line(d.sort_values("day"), x="day", y="discount_pct", color=columns_map[ctl_prod],
                        markers=True, title="Desconto base (quando em promoção)")
         st.plotly_chart(fig3, width='stretch')
@@ -1000,22 +997,6 @@ with tabs[1]:
                        color=columns_map[ctl_prod],
                        markers=True, title="Desconto lista (quando em promoção)")
         st.plotly_chart(fig4, width='stretch')
-
-
-        fig5 = px.bar(d.sort_values("day"), x="day", y="bsr")
-        fig5.add_scatter(x=d["day"], y=d["price_effective"], 
-                         mode="lines+markers", name="Preço médio", yaxis="y2")
-        
-        fig5.add_scatter(x=d["day"], y=d["price_base"], 
-                         mode="lines+markers", name="Preço base", yaxis="y2")
-        
-        fig5.add_scatter(x=d["day"], y=d["price_list"], 
-                         mode="lines+markers", name="Preço lista", yaxis="y2")
-        
-        fig5.update_layout(title="Evolução mensal de BSR e Preço", xaxis_title="Mês", 
-                           yaxis_title="BSR mediano", yaxis2=dict(title="Preço médio", 
-                           overlaying='y', side='right'))
-        st.plotly_chart(fig5, width='stretch')
         
         st.download_button("📥 Baixar dados filtrados (CSV)", data=to_csv_bytes(d), 
                            file_name="amazon_price_bsr_daily.csv", mime="text/csv")
@@ -1547,8 +1528,20 @@ with tabs[9]:
     st.plotly_chart(fig2, width='stretch')
 
     promo_depth = daily_f[daily_f["is_promo"]].copy()
-    fig3 = px.box(promo_depth, x="asin", y=promo_depth["discount_pct"] * 100,
-                  title="Distribuição de profundidade promocional (% vs base)", labels={"y": "% desconto vs base"})
+
+    fig4 = px.box(promo_depth, x=columns_map[ctl_prod], y=np.log(promo_depth["bsr"]),
+                  title="Distribuição de profundidade promocional (% vs base)", 
+                  labels={"y": "BSR"})
+    st.plotly_chart(fig4, width='stretch')
+
+    fig5 = px.box(promo_depth, x=columns_map[ctl_prod], y=promo_depth["price_effective"],
+                  title="Distribuição de profundidade promocional (% vs base)", 
+                  labels={"y": "Preço"})
+    st.plotly_chart(fig5, width='stretch')
+
+    fig3 = px.box(promo_depth, x=columns_map[ctl_prod], y=promo_depth["discount_pct"] * 100,
+                  title="Distribuição de profundidade promocional (% vs base)", 
+                  labels={"y": "% desconto vs base"})
     st.plotly_chart(fig3, width='stretch')
 
 
