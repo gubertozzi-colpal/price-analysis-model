@@ -27,7 +27,7 @@ from sklearn.cluster import KMeans
 # ----------------------------
 # Constants / Defaults
 # ----------------------------
-DEFAULT_DATA_GLOB = "./dev/data/*-bsr-1y*.csv"
+DEFAULT_DATA_GLOB = "./dev/data/*-bsr-*.csv"
 TZ = "America/Sao_Paulo"
 
 DEFAULT_EVENTS = [
@@ -310,6 +310,7 @@ def price_vs_bsr_corr(df: pd.DataFrame, method:str, id_prod: str) -> pd.DataFram
     """
     out = []
     columns_map = {'ASIN': 'asin', 'Descrição': 'sku_name'}
+    print(df.head())
     for asin, g in df.groupby(columns_map[id_prod]):
         n = g[["price_effective", "bsr"]].dropna().shape[0]
         # Exige ao menos 30 dias de dados para ser estatisticamente relevante
@@ -485,6 +486,7 @@ def monthly_agg(df: pd.DataFrame) -> pd.DataFrame:
         )
     )
 
+
 def competitive_map(df: pd.DataFrame, k=4, random_state=42) -> pd.DataFrame:
     """
     Aplica KMeans para agrupar SKUs com comportamentos similares baseados em 
@@ -504,6 +506,7 @@ def competitive_map(df: pd.DataFrame, k=4, random_state=42) -> pd.DataFrame:
     km = KMeans(n_clusters=k, n_init="auto", random_state=random_state)
     feat["cluster"] = km.fit_predict(Xs)
     return feat
+
 
 def event_summary(df: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp, baseline_days=14, pre=7, post=7) -> pd.DataFrame:
     win_start, win_end = start - pd.Timedelta(days=pre), end + pd.Timedelta(days=post)
@@ -535,6 +538,29 @@ def event_summary(df: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp, base
     out["bsr_med_delta"] = out["bsr_med_window"] - out["bsr_med_baseline"]
     out["price_delta"] = out["price_avg_window"] - out["price_avg_baseline"]
     return out.sort_values("bsr_med_delta")
+
+
+def flag_promo(df: pd.DataFrame, threshold: float = 0.05) -> pd.DataFrame:
+    """
+    Marca flags de promoção (True/False) baseado em um limiar de desconto.
+    - is_promo: baseado em discount_pct
+    - is_promo_list: baseado em discount_list_pct
+    """
+    df = df.copy()
+
+    # 1. Flag para o Desconto Efetivo
+    # Verifica se a coluna existe para evitar erros
+    if "discount_pct" in df.columns:
+        # A comparação vetorizada (df['col'] > x) retorna automaticamente True/False
+        # fillna(False) garante que nulos não virem True acidentalmente (embora a comparação > já trate isso)
+        df["is_promo"] = df["discount_pct"] > threshold
+
+    # 2. Flag para o Desconto de Lista
+    if "discount_list_pct" in df.columns:
+        df["is_promo_list"] = df["discount_list_pct"] > threshold
+
+    return df
+
 
 # ----------------------------
 # METADATA: Enterprise Improvement
@@ -680,20 +706,22 @@ def apply_metadata(daily: pd.DataFrame, meta: pd.DataFrame) -> pd.DataFrame:
 
 def meta_filters_ui(df: pd.DataFrame) -> pd.DataFrame:
     with st.sidebar:
-        st.header("🧩 Filtros (metadata)")
+        with st.expander("🧩 Filtros de Produto", expanded=False):
 
-        brands = sorted(df["brand"].dropna().astype(str).unique().tolist())
-        sel_brands = st.multiselect("Marca", options=brands, default=brands)
+            brands = sorted(df["brand"].dropna().astype(str).unique().tolist())
+            sel_brands = st.multiselect("Marca", options=brands, default=brands)
 
-        segments = sorted(df["segment"].dropna().astype(str).unique().tolist())
-        sel_segments = st.multiselect("Segmento", options=segments, default=segments)
+            segments = sorted(df["segment"].dropna().astype(str).unique().tolist())
+            sel_segments = st.multiselect("Segmento", options=segments, default=segments)
 
-        has_is_own = "is_own" in df.columns and df["is_own"].notna().any()
-        mode = "Todos"
-        if has_is_own:
-            mode = st.selectbox("Tipo", ["Todos", "Só meus (is_own=1)", "Só concorrentes (is_own=0)"], index=0)
+            has_is_own = "is_own" in df.columns and df["is_own"].notna().any()
+            mode = "Todos"
+            if has_is_own:
+                mode = st.selectbox("Tipo", ["Todos", "Só meus (is_own=1)", "Só concorrentes (is_own=0)"], index=0)
 
-        q = st.text_input("Buscar SKU (nome contém)", value="").strip().lower()
+            q = st.text_input("Buscar SKU (nome contém)", value="").strip().lower()
+
+            asin_filter = st.text_input("Buscar ASIN (separar por vírgula)", value="").strip().lower()
 
     f = df.copy()
     f = f[f["brand"].astype(str).isin(sel_brands)]
@@ -705,7 +733,12 @@ def meta_filters_ui(df: pd.DataFrame) -> pd.DataFrame:
     if q:
         f = f[f["sku_name"].astype(str).str.lower().str.contains(q, na=False)]
 
+    if asin_filter:
+        asin_list = [a.strip().lower() for a in asin_filter.split(",") if a.strip()]
+        f = f[f["asin"].astype(str).str.lower().isin([x.lower() for x in asin_list])]
+
     return f
+
 
 def filter_period(df: pd.DataFrame, min_date: pd.Timestamp, max_date: pd.Timestamp) -> pd.DataFrame:
     """Filtra o DataFrame para incluir apenas datas entre min_date e max_date (inclusivo)."""
@@ -719,52 +752,50 @@ st.set_page_config(page_title="Amazon Price x BSR Analytics", layout="wide")
 st.title("📊 Amazon – Análise Profissional de Preço x BSR (multi-SKU)")
 
 with st.sidebar:
-    st.header("⚙️ Configurações")
-
-    data_glob = st.text_input("DATA_GLOB (caminho/curinga dos CSVs)", value=DEFAULT_DATA_GLOB)
-    dayfirst = st.toggle("Datas no formato dia/mês (dayfirst)", value=True)
+    st.header("Setup Inicial")
 
     st.subheader("📅 Controles de Data")
     min_date = st.date_input("Data inicial mínima", value=pd.to_datetime("2025-01-01"))
     max_date = st.date_input("Data final máxima", value=pd.to_datetime("today"))
 
-    st.subheader("📈 Controles de Correlação")
+    st.subheader("📈 Controles")
     ctl_corr = st.selectbox("Tipo de Correlação", ["Kendall", "Pearson", "Spearman"], index=2)
     ctl_prod = st.selectbox("Identificador", ["ASIN", "Descrição"], index=1)
+    freq = st.selectbox("Frequência", ["Diário", "Mensal"], index=1)
 
-    st.subheader("Frequência")
-    freq = st.selectbox("Granularidade principal", ["Diário", "Mensal"], index=1)
+    with st.expander("📂 Fonte de Dados", expanded=False):
+        data_glob = st.text_input("DATA_GLOB (caminho/curinga dos CSVs)", value=DEFAULT_DATA_GLOB)
+        dayfirst = st.toggle("Datas no formato dia/mês (dayfirst)", value=True)
+        st.caption("Upload de CSV + validação + template para baixar.")
+        meta_file = st.file_uploader("Upload metadata CSV", type=["csv"])
 
-    st.subheader("Separação Base vs Promo")
-    roll_days = st.slider("Janela base (dias)", 14, 60, 30, 1)
-    base_q = st.slider("Quantil para base (p80 recomendado)", 0.6, 0.95, 0.8, 0.05)
-    promo_threshold = st.slider("Threshold promo (% abaixo do base)", 0.02, 0.25, 0.05, 0.01)
+    with st.expander('⚙️ Configurações',expanded=False):
+        roll_days = st.slider("Janela base (dias)", 14, 60, 30, 1)
+        base_q = st.slider("Quantil para base (p80 recomendado)", 0.6, 0.95, 0.8, 0.05)
+        promo_threshold = st.slider("Threshold promo (% abaixo do base)", 0.02, 0.25, 0.05, 0.01)
+        k_clusters = st.slider("Número de clusters", 2, 8, 4, 1)
 
-    st.subheader("Eventos")
-    baseline_days = st.slider("Baseline antes do evento (dias)", 7, 28, 14, 1)
-    pre = st.slider("Janela pré-evento (dias)", 0, 14, 7, 1)
-    post = st.slider("Janela pós-evento (dias)", 0, 14, 7, 1)
+    
+    with st.expander('🎉 Eventos',expanded=False):
+        baseline_days = st.slider("Baseline antes do evento (dias)", 7, 28, 14, 1)
+        pre = st.slider("Janela pré-evento (dias)", 0, 14, 7, 1)
+        post = st.slider("Janela pós-evento (dias)", 0, 14, 7, 1)
 
-    events = st.session_state.get("events", DEFAULT_EVENTS)
-    st.caption("Edite/adicione eventos (YYYY-MM-DD).")
-    if st.button("➕ Adicionar evento"):
-        events = events + [{"name": "Novo Evento", "start": "2025-01-01", "end": "2025-01-01"}]
-    new_events = []
-    for i, ev in enumerate(events):
-        st.markdown(f"**Evento {i+1}**")
-        name = st.text_input(f"Nome {i+1}", value=ev["name"], key=f"ev_name_{i}")
-        start = st.text_input(f"Início {i+1}", value=ev["start"], key=f"ev_start_{i}")
-        end = st.text_input(f"Fim {i+1}", value=ev["end"], key=f"ev_end_{i}")
-        new_events.append({"name": name, "start": start, "end": end})
-        st.divider()
-    st.session_state["events"] = new_events
+        events = st.session_state.get("events", DEFAULT_EVENTS)
+        st.caption("Edite/adicione eventos (YYYY-MM-DD).")
+        if st.button("➕ Adicionar evento"):
+            events = events + [{"name": "Novo Evento", "start": "2025-01-01", "end": "2025-01-01"}]
+        new_events = []
+        for i, ev in enumerate(events):
+            st.markdown(f"**Evento {i+1}**")
+            name = st.text_input(f"Nome {i+1}", value=ev["name"], key=f"ev_name_{i}")
+            start = st.text_input(f"Início {i+1}", value=ev["start"], key=f"ev_start_{i}")
+            end = st.text_input(f"Fim {i+1}", value=ev["end"], key=f"ev_end_{i}")
+            new_events.append({"name": name, "start": start, "end": end})
+            st.divider()
+        st.session_state["events"] = new_events 
 
-    st.subheader("Mapa competitivo")
-    k_clusters = st.slider("Número de clusters", 2, 8, 4, 1)
-
-    st.subheader("📎 Metadata (enterprise)")
-    st.caption("Upload de CSV + validação + template para baixar.")
-    meta_file = st.file_uploader("Upload metadata CSV", type=["csv"])
+    
 
 # Load core data
 raw = load_all(data_glob=data_glob, dayfirst=dayfirst)
@@ -779,7 +810,7 @@ asins_in_data = sorted(daily["asin"].unique().tolist())
 meta = pd.DataFrame()
 diag = {"errors": [], "warnings": [], "coverage": {}}
 
-with st.expander("📎 Metadata – Template, Mapeamento e Validação", expanded=True):
+with st.expander("📎 Metadata – Template, Mapeamento e Validação", expanded=False):
     st.markdown(
         """
 Aqui você:
@@ -882,8 +913,8 @@ pages = [
     "Evolução",
     "Detalhado",
     "Correlação",
-    "Índice de Preço (Price Index)",
-    "Preço mágico + Elasticidade (proxy)",
+    "Índice de Preço",
+    "Preço Mágico",
     "Mapa Competitivo (clusters)",
     "Playbook de Eventos (Prime/Black/etc.)",
     "Recomendações (Tático & Estratégico)",
@@ -898,7 +929,7 @@ def enrich_with_meta(df: pd.DataFrame) -> pd.DataFrame:
     return meta_unique.merge(df, on="asin", how="right")
 
 
-# Tab 1
+# Tab 1 - Visão Geral
 with tabs[0]:
     st.subheader("✅ Visão Geral (com metadata enriquecendo tudo)")
     c1, c2, c3, c4 = st.columns(4)
@@ -914,10 +945,51 @@ with tabs[0]:
         """
     )
 
+    color_map = {
+    #True: "#0000FF",   # Verde (cor padrão do Plotly para 'success')
+    False: "#7f7f7f"}  # Cinza escuro (neutro)}
+
+    promo_depth = flag_promo(daily_f, promo_threshold)
+    promo_depth["discount_pct"] *= 100
+    promo_depth["discount_list_pct"] *= 100
+    promo_depth['day'] = pd.to_datetime(promo_depth['day'])
+
     st.dataframe(enrich_with_meta(summ2).sort_values("bsr_med"), width='stretch', hide_index=True)
 
+    fig2 = px.scatter(promo_depth, x="discount_pct", y="bsr", color="is_promo",
+                    color_discrete_map=color_map, title=f"Profundidade (vs base) x BSR",
+                    labels={"discount_pct": "Desconto vs base (%)", "bsr": "BSR"},
+                    hover_data=['sku_name', 'day'])
+    fig2.update_layout(xaxis=dict(range=[-100, 75]))
+    fig2.update_traces(
+        hovertemplate=(
+            "<b>%{customdata[0]}</b><br>" +             # Nome do Produto em Negrito
+            "Data: %{customdata[1]|%d/%m/%Y}<br>" +     # Data formatada BR
+            "Desconto: %{x:.1f}%<br>" +                 # X com 1 casa decimal
+            "BSR: %{y}" +                               # Y normal
+            "<extra></extra>"                           # Remove a caixinha lateral extra
+        )
+    )
+    st.plotly_chart(fig2, width='stretch')
 
-# Tab 2
+    fig6 = px.scatter(promo_depth, x="discount_list_pct", y="bsr", color="is_promo_list",
+                    color_discrete_map=color_map, title=f"Profundidade (vs lista) x BSR",
+                    labels={"discount_list_pct": "Desconto vs lista (%)", "bsr": "BSR"},
+                    hover_data=['sku_name', 'day'])
+    fig6.update_layout(xaxis=dict(range=[-100, 75]))
+    fig6.update_traces(
+        hovertemplate=(
+            "<b>%{customdata[0]}</b><br>" +             # Nome do Produto em Negrito
+            "Data: %{customdata[1]|%d/%m/%Y}<br>" +     # Data formatada BR
+            "Desconto: %{x:.1f}%<br>" +                 # X com 1 casa decimal
+            "BSR: %{y}" +                               # Y normal
+            "<extra></extra>"                           # Remove a caixinha lateral extra
+        )
+    )
+    st.plotly_chart(fig6, width='stretch')
+
+
+# Tab 2 - Evolução
 with tabs[1]:
     st.subheader("📈 Evolução – Preço e BSR")
     
@@ -1001,7 +1073,7 @@ with tabs[1]:
                            file_name="amazon_price_bsr_daily.csv", mime="text/csv")
 
 
-# Tab 3
+# Tab 3 - Detalhado
 with tabs[2]:
     st.subheader("🏷️ Base vs Promo – Rebaixa e Profundidade")
     with st.expander("📄 Instruções de uso", expanded=False):
@@ -1098,7 +1170,7 @@ with tabs[2]:
                            file_name=f'amazon_price_bsr_daly_{a}.csv', mime="text/csv")
 
 
-# Tab 4
+# Tab 4 - Correlação
 with tabs[3]:
     st.subheader("🔗 Correlação – Quem compete com quem")
     st.markdown(
@@ -1330,7 +1402,7 @@ with tabs[3]:
     st.plotly_chart(fig4_scatter, width='stretch', config=config_export, key='teste_scatter_4')
 
 
-# Tab 5
+# Tab 5 - Índice de Preço
 with tabs[4]:
     st.subheader("📌 Índice de Preço (Price Index)")
     st.markdown(
@@ -1368,9 +1440,9 @@ with tabs[4]:
             st.plotly_chart(fig, width='stretch')
 
 
-# Tab 6
+# Tab 6 - Preço Mágico
 with tabs[5]:
-    st.subheader("✨ Preço mágico + Elasticidade (proxy)")
+    st.subheader("✨ Preço mágico")
     st.markdown(
         """
 **Tático:** definir “preço de ataque” por SKU/segmento.  
@@ -1521,12 +1593,7 @@ Isso é perfeito para reuniões de categoria: você troca o filtro e o plano mud
 with tabs[9]:
     st.subheader("🧪 Testes")
 
-    fig2 = px.scatter(g, x="discount_pct", y="bsr", color="is_promo",
-                      title=f"Profundidade (vs base) x BSR – {a}",
-                      labels={"discount_pct": "Desconto vs base", "bsr": "BSR"})
-    st.plotly_chart(fig2, width='stretch')
-
-    promo_depth = daily_f[daily_f["is_promo"]].copy()
+    promo_depth = daily_f.copy()
 
     fig4 = px.box(promo_depth, x=columns_map[ctl_prod], y=np.log(promo_depth["bsr"]),
                   title="Distribuição de profundidade promocional (% vs base)", 
