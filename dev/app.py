@@ -23,6 +23,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 from sklearn.preprocessing import StandardScaler
 from sklearn.cluster import KMeans
+from sklearn.ensemble import IsolationForest
 
 # ----------------------------
 # Constants / Defaults
@@ -395,6 +396,8 @@ def elasticity_proxy(df: pd.DataFrame, asin: str, bucket_round=2, min_n=6) -> pd
     b["d_price"] = b["price_bucket"].diff()
     b["d_log_bsr"] = b["log_bsr_med"].diff()
     b["elasticity_proxy"] = (b["d_log_bsr"] / b["d_price"]).replace([np.inf, -np.inf], np.nan)
+    print(b.head())
+    print('###############################################################################')
     return b
 
 
@@ -560,6 +563,69 @@ def flag_promo(df: pd.DataFrame, threshold: float = 0.05) -> pd.DataFrame:
 
     return df
 
+
+def get_clean_data(df_asin: pd.DataFrame, price_col: str) -> pd.DataFrame:
+    """
+    Remove anomalias de BSR (ex: rupturas de estoque) usando Isolation Forest
+    para garantir que o preço mágico não seja calculado sobre dados ruidosos.
+    """
+    if len(df_asin) < 15:
+        return df_asin
+        
+    # Identifica pontos que fogem da relação preço/bsr usual (ex: BSR alto com preço baixo)
+    model = IsolationForest(contamination=0.07, random_state=42)
+    preds = model.fit_predict(df_asin[[price_col, 'bsr']])
+    return df_asin[preds == 1].copy()
+
+
+def calculate_magic_metrics(df_asin: pd.DataFrame) -> dict:
+    """
+    Realiza o clustering e rotula os regimes como 'Ataque', 'Equilíbrio' e 'Premium'.
+    """
+    # 1. Limpeza de dados (usando price_effective conforme discutido)
+    df = get_clean_data(df_asin, price_col='price_effective')
+    
+    qty = df['pack_qty'].iloc[0] if 'pack_qty' in df.columns and df['pack_qty'].iloc[0] > 0 else 1
+    df['unit_price'] = df['price_effective'] / qty
+
+    # 2. Clustering
+    scaler = StandardScaler()
+    scaled_prices = scaler.fit_transform(df[['price_effective']])
+    n_unique_prices = len(df['price_effective'].unique())
+    n_clusters = min(3, n_unique_prices)
+    
+    kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+    df['cluster_id'] = kmeans.fit_predict(scaled_prices)
+
+    # 3. Lógica de Nomenclatura Dinâmica
+    # Calculamos o preço médio de cada cluster para ordenar do mais barato ao mais caro
+    cluster_order = df.groupby('cluster_id')['price_effective'].mean().sort_values().index
+    
+    # Mapeamento de nomes baseado na posição (ordem de preço)
+    names = ['🥊 Ataque', '⚖️ Equilíbrio', '💎 Premium']
+    mapping = {cluster_id: names[i] for i, cluster_id in enumerate(cluster_order)}
+    df['regime'] = df['cluster_id'].map(mapping)
+
+    # 4. Agregação Final
+    summary = df.groupby('regime').agg(
+        preço_médio=('price_effective', 'mean'),
+        preço_unitário=('unit_price', 'mean'),
+        bsr_mediano=('bsr', 'median'),
+        samples=('bsr', 'size')
+    ).sort_values('preço_médio') # Ordenado por preço para leitura fácil
+
+    # O "Preço Mágico" ainda é o que tem o MENOR BSR
+    best_regime_row = df.groupby('regime')['bsr'].median().idxmin()
+    best_data = summary.loc[best_regime_row]
+    
+    return {
+        "magic_price": best_data['preço_médio'],
+        "magic_unit_price": best_data['preço_unitário'],
+        "target_bsr": best_data['bsr_mediano'],
+        "magic_regime_name": best_regime_row,
+        "df_analyzed": df,
+        "summary": summary
+    }
 
 # ----------------------------
 # METADATA: Enterprise Improvement
@@ -904,7 +970,8 @@ bsr_corr = method_corr_pivot(daily_f, "bsr",ctl_corr, ctl_prod)
 cross_corr = cross_price_bsr_matrix(daily_f, ctl_corr, ctl_prod)
 scatter_price = scatter_corr(daily_f, value_col="price_effective", id_prod=ctl_prod)
 scatter_bsr = scatter_corr(daily_f, value_col="bsr", id_prod=ctl_prod)
-asins = sorted(daily_f["asin"].unique().tolist())
+asins = sorted(daily_f[columns_map[ctl_prod]].unique().tolist())
+
 
 # Tabs
 pages = [
@@ -1464,25 +1531,20 @@ with tabs[5]:
 
 # Tab 7 - Preço Mágico
 with tabs[6]:
-    st.subheader("✨ Preço mágico")
+    st.subheader("✨ Inteligência de Preço Mágico")
     st.markdown(
         """
+ Identificação automática de 'Preços de Ataque' e regimes de competitividade via ML.
 **Tático:** definir “preço de ataque” por SKU/segmento.  
 **Estratégico:** escada de promo e governança por cluster.
         """
     )
-
-    if not best_prices.empty:
-        st.dataframe(enrich_with_meta(best_prices), width='stretch', hide_index=True)
-    else:
-        st.info("Sem cálculo robusto de preço mágico (poucos buckets repetidos).")
-
-    a = st.selectbox("Detalhar curva de um SKU", options=asins, index=0, key="elastic_asin")
-    el = elasticity_proxy(daily_f, a, bucket_round=2, min_n=6)
+    selected_a = st.selectbox("Selecione um SKU para análise profunda", options=asins, key="magic_selector")
+    el = elasticity_proxy(daily_f, selected_a, bucket_round=2, min_n=6)
     if el.empty:
         st.warning("Sem dados suficientes por bucket para este SKU.")
     else:
-        title_name = daily_f.loc[daily_f["asin"] == a, "sku_name"].iloc[0] if "sku_name" in daily_f.columns else a
+        title_name = daily_f.loc[daily_f["asin"] == selected_a, "sku_name"].iloc[0] if "sku_name" in daily_f.columns else a
         fig = px.line(el, x="price_bucket", y="bsr_median", markers=True,
                       title=f"Curva preço → BSR mediano (buckets) – {title_name}")
         st.plotly_chart(fig, width='stretch')
@@ -1490,6 +1552,88 @@ with tabs[6]:
         fig2 = px.bar(el, x="price_bucket", y="elasticity_proxy",
                       title=f"Elasticidade (proxy) – {title_name} (Δlog(BSR)/Δpreço)")
         st.plotly_chart(fig2, width='stretch')
+
+    # --- Dentro da sua lógica de TABS do Streamlit ---
+
+    st.divider()
+
+    # --- ABA: PREÇO MÁGICO ---
+    st.markdown("Identificação automática de 'Preços de Ataque' e regimes de competitividade via ML.")
+
+    # 1. Geração de Relatório Consolidado (Download)
+    all_magic_results = []
+    for asin_code in asins:
+        sku_subset = daily_f[daily_f[columns_map[ctl_prod]] == asin_code]
+        if len(sku_subset) > 10:
+            res = calculate_magic_metrics(sku_subset)
+            all_magic_results.append({
+                "asin": asin_code,
+                "sku_name": sku_subset['sku_name'].iloc[0] if 'sku_name' in sku_subset.columns else asin_code,
+                "preço_mágico_pack": res['magic_price'],
+                "preço_mágico_unitário": res['magic_unit_price'],
+                "bsr_alvo": res['target_bsr'],
+                "confiança_dados": res['summary']['samples'].sum()
+            })
+        
+    # 2. Detalhamento Visual por SKU
+    sku_history = daily_f[daily_f[columns_map[ctl_prod]] == selected_a].copy()
+
+    if len(sku_history) > 10:
+        magic_res = calculate_magic_metrics(sku_history)
+        df_plot = magic_res["df_analyzed"]
+        
+        # KPIs Rápidas
+        kpi1, kpi2, kpi3 = st.columns(3)
+        kpi1.metric("Preço Mágico (Pack)", f"R$ {magic_res['magic_price']:.2f}")
+        kpi2.metric("Preço p/ Unidade", f"R$ {magic_res['magic_unit_price']:.2f}")
+        kpi3.metric("BSR Mediano Alvo", int(magic_res['target_bsr']))
+
+        # Gráfico de Regimes e Tendência
+        st.write("#### Curva de Performance e Regimes Identificados")
+        fig_magic = px.scatter(
+                df_plot, 
+                x="price_effective", # Usando o preço efetivo
+                y="bsr", 
+                color="regime", # Agora aparecerá 'Ataque', 'Equilíbrio', etc.
+                color_discrete_map={
+                    '🥊 Ataque': '#00CC96',     # Verde
+                    '⚖️ Equilíbrio': '#636EFA',   # Azul
+                    '💎 Premium': '#EF553B'      # Vermelho
+                },
+                title=f"Análise de Regimes de Preço - {selected_a}",
+                labels={"price_effective": "Preço Final", 
+                        "bsr": "Ranking (BSR)", "regime": "Estratégia"},
+                trendline="lowess"
+            )
+        st.plotly_chart(fig_magic, width='stretch')
+
+        # Histograma de Eficiência Unitária
+        st.write("#### Sensibilidade por Preço Unitário")
+        fig_unit_hist = px.histogram(
+            df_plot, x="unit_price", y="bsr", histfunc="avg", nbins=15,
+            title="BSR Médio por Preço por Unidade",
+            color_discrete_sequence=['#00CC96']
+        )
+        st.plotly_chart(fig_unit_hist, use_container_width=True)
+
+        # Tabela Detalhada
+        with st.expander("Ver detalhes estatísticos dos regimes"):
+            st.table(magic_res["summary"])
+    else:
+        st.info("Este SKU ainda não possui histórico suficiente para análise de Machine Learning.")
+
+    
+    if all_magic_results:
+        df_export = pd.DataFrame(all_magic_results)
+        csv_data = df_export.to_csv(index=False).encode('utf-8')
+
+    st.download_button(
+            label="📥 Baixar Estratégia de Pricing (CSV)",
+            data=csv_data,
+            file_name='relatorio_preco_magico.csv',
+            mime='text/csv',
+            help="Exporta o preço mágico sugerido para todos os SKUs da base."
+        )
 
 
 # Tab 8
