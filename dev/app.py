@@ -310,7 +310,6 @@ def price_vs_bsr_corr(df: pd.DataFrame, method:str, id_prod: str) -> pd.DataFram
     """
     out = []
     columns_map = {'ASIN': 'asin', 'Descrição': 'sku_name'}
-    print(df.head())
     for asin, g in df.groupby(columns_map[id_prod]):
         n = g[["price_effective", "bsr"]].dropna().shape[0]
         # Exige ao menos 30 dias de dados para ser estatisticamente relevante
@@ -913,6 +912,7 @@ pages = [
     "Evolução",
     "Detalhado",
     "Correlação",
+    "Descontos",
     "Índice de Preço",
     "Preço Mágico",
     "Mapa Competitivo (clusters)",
@@ -1402,8 +1402,30 @@ with tabs[3]:
     st.plotly_chart(fig4_scatter, width='stretch', config=config_export, key='teste_scatter_4')
 
 
-# Tab 5 - Índice de Preço
+# Tab 5 - Desconto
 with tabs[4]:
+    st.subheader("🏷️ Impacto de Descontos")
+
+    promo_depth = daily_f.copy()
+
+    fig4 = px.box(promo_depth, x=columns_map[ctl_prod], y=np.log(promo_depth["bsr"]),
+                  title="Distribuição de profundidade promocional (% vs base)", 
+                  labels={"y": "BSR"})
+    st.plotly_chart(fig4, width='stretch')
+
+    fig5 = px.box(promo_depth, x=columns_map[ctl_prod], y=promo_depth["price_effective"],
+                  title="Distribuição de profundidade promocional (% vs base)", 
+                  labels={"y": "Preço"})
+    st.plotly_chart(fig5, width='stretch')
+
+    fig3 = px.box(promo_depth, x=columns_map[ctl_prod], y=promo_depth["discount_pct"] * 100,
+                  title="Distribuição de profundidade promocional (% vs base)", 
+                  labels={"y": "% desconto vs base"})
+    st.plotly_chart(fig3, width='stretch')
+
+
+# Tab 6 - Índice de Preço
+with tabs[5]:
     st.subheader("📌 Índice de Preço (Price Index)")
     st.markdown(
         """
@@ -1440,8 +1462,8 @@ with tabs[4]:
             st.plotly_chart(fig, width='stretch')
 
 
-# Tab 6 - Preço Mágico
-with tabs[5]:
+# Tab 7 - Preço Mágico
+with tabs[6]:
     st.subheader("✨ Preço mágico")
     st.markdown(
         """
@@ -1470,8 +1492,8 @@ with tabs[5]:
         st.plotly_chart(fig2, width='stretch')
 
 
-# Tab 7
-with tabs[6]:
+# Tab 8
+with tabs[7]:
     st.subheader("🗺️ Mapa Competitivo (clusters) – enriquecido com metadata")
     st.markdown(
         """
@@ -1498,8 +1520,8 @@ with tabs[6]:
     st.plotly_chart(fig, width='stretch')
 
 
-# Tab 8
-with tabs[7]:
+# Tab 9
+with tabs[8]:
     st.subheader("🎯 Playbook de Eventos – com leitura por metadata")
     st.markdown(
         """
@@ -1545,8 +1567,8 @@ with tabs[7]:
         st.plotly_chart(fig2, width='stretch')
 
 
-# Tab 9
-with tabs[8]:
+# Tab 10
+with tabs[9]:
     st.subheader("🧠 Recomendações (Tático & Estratégico) – contextualizadas")
     st.markdown(
         """
@@ -1589,26 +1611,9 @@ Isso é perfeito para reuniões de categoria: você troca o filtro e o plano mud
     )
 
 
-# Tab 10 - Teste
-with tabs[9]:
+# Tab 11 - Teste
+with tabs[10]:
     st.subheader("🧪 Testes")
-
-    promo_depth = daily_f.copy()
-
-    fig4 = px.box(promo_depth, x=columns_map[ctl_prod], y=np.log(promo_depth["bsr"]),
-                  title="Distribuição de profundidade promocional (% vs base)", 
-                  labels={"y": "BSR"})
-    st.plotly_chart(fig4, width='stretch')
-
-    fig5 = px.box(promo_depth, x=columns_map[ctl_prod], y=promo_depth["price_effective"],
-                  title="Distribuição de profundidade promocional (% vs base)", 
-                  labels={"y": "Preço"})
-    st.plotly_chart(fig5, width='stretch')
-
-    fig3 = px.box(promo_depth, x=columns_map[ctl_prod], y=promo_depth["discount_pct"] * 100,
-                  title="Distribuição de profundidade promocional (% vs base)", 
-                  labels={"y": "% desconto vs base"})
-    st.plotly_chart(fig3, width='stretch')
 
 
 st.caption("App de análise Preço x BSR com metadata enterprise (template + mapeamento + validação + cobertura).")
