@@ -355,6 +355,7 @@ def bin_index_perf(df_merge: pd.DataFrame, bins=None) -> pd.DataFrame:
     
     return out
 
+
 def discount_bins(daily_df: pd.DataFrame, who: str) -> pd.DataFrame:
     x = daily_df.copy()
     # Cria os intervalos
@@ -736,9 +737,6 @@ with tabs[3]:
     )
     st.plotly_chart(fig_bar, use_container_width=True)
 
-# -------------------------
-# Tab 4: Price Index
-# -------------------------
 # -------------------------
 # Tab 4: Price Index
 # -------------------------
