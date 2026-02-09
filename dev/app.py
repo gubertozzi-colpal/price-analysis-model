@@ -383,7 +383,7 @@ def elasticity_proxy(df: pd.DataFrame, asin: str, bucket_round=2, min_n=6) -> pd
     Tenta estimar a elasticidade preço-demanda (usando BSR como proxy de vendas).
     Calcula a variação do log do BSR em relação à variação do preço.
     """
-    g = df[df["asin"] == asin].copy()
+    g = df[df[columns_map[ctl_prod]] == asin].copy()
     if g.empty:
         return pd.DataFrame()
 
@@ -397,7 +397,6 @@ def elasticity_proxy(df: pd.DataFrame, asin: str, bucket_round=2, min_n=6) -> pd
     b["d_log_bsr"] = b["log_bsr_med"].diff()
     b["elasticity_proxy"] = (b["d_log_bsr"] / b["d_price"]).replace([np.inf, -np.inf], np.nan)
     print(b.head())
-    print('###############################################################################')
     return b
 
 
@@ -611,7 +610,7 @@ def calculate_magic_metrics(df_asin: pd.DataFrame) -> dict:
         preço_médio=('price_effective', 'mean'),
         preço_unitário=('unit_price', 'mean'),
         bsr_mediano=('bsr', 'median'),
-        samples=('bsr', 'size')
+        amostras=('bsr', 'size')
     ).sort_values('preço_médio') # Ordenado por preço para leitura fácil
 
     # O "Preço Mágico" ainda é o que tem o MENOR BSR
@@ -1544,7 +1543,7 @@ with tabs[6]:
     if el.empty:
         st.warning("Sem dados suficientes por bucket para este SKU.")
     else:
-        title_name = daily_f.loc[daily_f["asin"] == selected_a, "sku_name"].iloc[0] if "sku_name" in daily_f.columns else a
+        title_name = daily_f.loc[daily_f[columns_map[ctl_prod]] == selected_a, "sku_name"].iloc[0] if "sku_name" in daily_f.columns else a
         fig = px.line(el, x="price_bucket", y="bsr_median", markers=True,
                       title=f"Curva preço → BSR mediano (buckets) – {title_name}")
         st.plotly_chart(fig, width='stretch')
@@ -1572,7 +1571,7 @@ with tabs[6]:
                 "preço_mágico_pack": res['magic_price'],
                 "preço_mágico_unitário": res['magic_unit_price'],
                 "bsr_alvo": res['target_bsr'],
-                "confiança_dados": res['summary']['samples'].sum()
+                "confiança_dados": res['summary']['amostras'].sum()
             })
         
     # 2. Detalhamento Visual por SKU
@@ -1609,12 +1608,40 @@ with tabs[6]:
 
         # Histograma de Eficiência Unitária
         st.write("#### Sensibilidade por Preço Unitário")
+        # Criando o histograma
         fig_unit_hist = px.histogram(
-            df_plot, x="unit_price", y="bsr", histfunc="avg", nbins=15,
-            title="BSR Médio por Preço por Unidade",
-            color_discrete_sequence=['#00CC96']
+            df_plot, 
+            x="unit_price", 
+            y="bsr", 
+            histfunc="avg", 
+            nbins=15,
+            title=f"📊 Sensibilidade: BSR Médio por Preço Unitário",
+            color_discrete_sequence=['#83C9FF']
         )
-        st.plotly_chart(fig_unit_hist, use_container_width=True)
+
+        # 1. Configurando o Hover (Texto ao passar o mouse)
+        fig_unit_hist.update_traces(
+            hovertemplate="<br>".join([
+                "<b>Faixa de Preço Unit.:</b> R$ %{x:.2f}",
+                "<b>BSR Médio:</b> %{y:.0f}",
+                "<extra></extra>" # Remove a legenda lateral de 'trace 0'
+            ])
+        )
+
+        # 2. Configurando Eixos e Layout
+        fig_unit_hist.update_layout(
+            xaxis_title="Preço Unitário",
+            yaxis_title="BSR Médio",
+            hovermode="x unified", # Facilita a leitura ao alinhar o hover com o eixo X
+            bargap=0.1,            # Adiciona um pequeno espaçamento entre as barras para legibilidade
+            plot_bgcolor="rgba(0,0,0,0)", # Fundo transparente para combinar com o tema do Streamlit
+        )
+
+        # 3. Ajustando grades dos eixos para um visual mais limpo
+        fig_unit_hist.update_xaxes(showgrid=False, tickprefix="R$ ")
+        fig_unit_hist.update_yaxes(showgrid=True, gridcolor='LightGray')
+
+        st.plotly_chart(fig_unit_hist, width='stretch')
 
         # Tabela Detalhada
         with st.expander("Ver detalhes estatísticos dos regimes"):
