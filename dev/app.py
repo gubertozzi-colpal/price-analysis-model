@@ -396,7 +396,6 @@ def elasticity_proxy(df: pd.DataFrame, asin: str, bucket_round=2, min_n=6) -> pd
     b["d_price"] = b["price_bucket"].diff()
     b["d_log_bsr"] = b["log_bsr_med"].diff()
     b["elasticity_proxy"] = (b["d_log_bsr"] / b["d_price"]).replace([np.inf, -np.inf], np.nan)
-    print(b.head())
     return b
 
 
@@ -459,7 +458,7 @@ def build_best_prices(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def price_index(df: pd.DataFrame, leader_asin: str) -> pd.DataFrame:
-    pivot = df.pivot(index="day", columns="asin", values="price_effective")
+    pivot = df.pivot(index="day", columns=columns_map[ctl_prod], values="price_effective")
     if leader_asin not in pivot.columns:
         return pd.DataFrame()
     leader = pivot[leader_asin]
@@ -625,6 +624,33 @@ def calculate_magic_metrics(df_asin: pd.DataFrame) -> dict:
         "df_analyzed": df,
         "summary": summary
     }
+
+
+def get_comparison_stats(df: pd.DataFrame, step: float, tops: list) -> pd.DataFrame:
+    """Gera estatísticas de BSR incluindo % de tempo em Top X dinâmico."""
+    df = df.copy()
+    df['range'] = (df['price_effective'] // step) * step
+    
+    # Criamos colunas auxiliares para cada Top X solicitado
+    # Se BSR <= limite, 1 (True), senão 0 (False)
+    for t in tops:
+        df[f'is_top_{t}'] = (df['bsr'] <= t).astype(int)
+
+    # Dicionário de agregação básico
+    agg_dict = {
+        'bsr': ['size', 'median', 'mean']
+    }
+    # Adicionamos a média das colunas Top X (que resultará na porcentagem)
+    for t in tops:
+        agg_dict[f'is_top_{t}'] = 'mean'
+    
+    stats = df.groupby('range').agg(agg_dict).reset_index()
+    
+    # Achatar colunas multi-índice
+    stats.columns = ['range', 'days', 'rank_median', 'rank_mean'] + [f'top{t}_share' for t in tops]
+    
+    stats['price_range'] = stats['range'].apply(lambda x: f"R$ {x:.2f} - {x+step:.2f}")
+    return stats
 
 # ----------------------------
 # METADATA: Enterprise Improvement
@@ -838,6 +864,9 @@ with st.sidebar:
         base_q = st.slider("Quantil para base (p80 recomendado)", 0.6, 0.95, 0.8, 0.05)
         promo_threshold = st.slider("Threshold promo (% abaixo do base)", 0.02, 0.25, 0.05, 0.01)
         k_clusters = st.slider("Número de clusters", 2, 8, 4, 1)
+        price_step = st.slider("Intervalo de Preço (R$)", min_value=0.1, max_value=5.0, 
+                                        value=0.5, step=0.1,
+                                        help="Define o tamanho do bloco de preço para a tabela comparativa.")
 
     
     with st.expander('🎉 Eventos',expanded=False):
@@ -1538,23 +1567,13 @@ with tabs[6]:
 **Estratégico:** escada de promo e governança por cluster.
         """
     )
-    selected_a = st.selectbox("Selecione um SKU para análise profunda", options=asins, key="magic_selector")
-    el = elasticity_proxy(daily_f, selected_a, bucket_round=2, min_n=6)
-    if el.empty:
-        st.warning("Sem dados suficientes por bucket para este SKU.")
-    else:
-        title_name = daily_f.loc[daily_f[columns_map[ctl_prod]] == selected_a, "sku_name"].iloc[0] if "sku_name" in daily_f.columns else a
-        fig = px.line(el, x="price_bucket", y="bsr_median", markers=True,
-                      title=f"Curva preço → BSR mediano (buckets) – {title_name}")
-        st.plotly_chart(fig, width='stretch')
-
-        fig2 = px.bar(el, x="price_bucket", y="elasticity_proxy",
-                      title=f"Elasticidade (proxy) – {title_name} (Δlog(BSR)/Δpreço)")
-        st.plotly_chart(fig2, width='stretch')
-
-    # --- Dentro da sua lógica de TABS do Streamlit ---
-
-    st.divider()
+    col_a, col_b = st.columns(2)
+    with col_a:
+        selected_a = st.selectbox("Produto A (Principal)", options=asins, key="magic_selector")
+    with col_b:
+        # Filtra asins para não selecionar o mesmo no B (opcional)
+        options_b = [opt for opt in asins if opt != selected_a]
+        selected_b = st.selectbox("Produto B (Comparativo)", options=options_b, key="bench_selector")
 
     # --- ABA: PREÇO MÁGICO ---
     st.markdown("Identificação automática de 'Preços de Ataque' e regimes de competitividade via ML.")
@@ -1587,6 +1606,12 @@ with tabs[6]:
         kpi2.metric("Preço p/ Unidade", f"R$ {magic_res['magic_unit_price']:.2f}")
         kpi3.metric("BSR Mediano Alvo", int(magic_res['target_bsr']))
 
+
+        # Tabela Detalhada
+        with st.expander("Ver detalhes estatísticos dos regimes"):
+            st.table(magic_res["summary"])
+    
+
         # Gráfico de Regimes e Tendência
         st.write("#### Curva de Performance e Regimes Identificados")
         fig_magic = px.scatter(
@@ -1611,7 +1636,7 @@ with tabs[6]:
         # Criando o histograma
         fig_unit_hist = px.histogram(
             df_plot, 
-            x="unit_price", 
+            x="price_effective", 
             y="bsr", 
             histfunc="avg", 
             nbins=15,
@@ -1630,7 +1655,7 @@ with tabs[6]:
 
         # 2. Configurando Eixos e Layout
         fig_unit_hist.update_layout(
-            xaxis_title="Preço Unitário",
+            xaxis_title="Preço Final",
             yaxis_title="BSR Médio",
             hovermode="x unified", # Facilita a leitura ao alinhar o hover com o eixo X
             bargap=0.1,            # Adiciona um pequeno espaçamento entre as barras para legibilidade
@@ -1643,13 +1668,79 @@ with tabs[6]:
 
         st.plotly_chart(fig_unit_hist, width='stretch')
 
-        # Tabela Detalhada
-        with st.expander("Ver detalhes estatísticos dos regimes"):
-            st.table(magic_res["summary"])
+
     else:
         st.info("Este SKU ainda não possui histórico suficiente para análise de Machine Learning.")
-
     
+
+    st.write("#### 📊 Performance e Ranquing Share")
+    st.markdown("Configure os limites de **Top Rank** para ver a dominância em cada faixa de preço:")
+
+    # Inputs Dinâmicos para os "Top X"
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        top_val1 = st.number_input("Limite 1 (Top X)", value=10, step=5, key="t1")
+    with c2:
+        top_val2 = st.number_input("Limite 2 (Top X)", value=20, step=5, key="t2")
+    with c3:
+        top_val3 = st.number_input("Limite 3 (Top X)", value=50, step=5, key="t3")
+
+    list_tops = [top_val1, top_val2, top_val3]
+
+    # Processamento com os novos limites
+    data_a = daily_f[daily_f[columns_map[ctl_prod]] == selected_a]
+    data_b = daily_f[daily_f[columns_map[ctl_prod]] == selected_b]
+    stats_a = get_comparison_stats(data_a, price_step, list_tops)
+    stats_b = get_comparison_stats(data_b, price_step, list_tops)
+
+    # Merge dos dados
+    comparison_df = pd.merge(
+        stats_a, stats_b, on="price_range", how="outer", suffixes=('_A', '_B')
+    ).sort_values("range_A").fillna(0)
+
+    # Formatação de Porcentagem para as colunas de Share
+    cols_to_format = [f'top{t}_share_A' for t in list_tops] + [f'top{t}_share_B' for t in list_tops]
+    for col in cols_to_format:
+        comparison_df[col] = (comparison_df[col] * 100).map("{:.1f}%".format)
+
+    # Definindo a função de estilo para a coluna de preço
+    def style_price_col(df):
+        # Criamos um DataFrame de estilos vazio
+        style_df = pd.DataFrame('', index=df.index, columns=df.columns)
+        
+        # Aplicamos a cor escura na coluna de 'Price Range'
+        # 'background-color: #262730' é um cinza escuro que combina com o tema dark do Streamlit
+        style_df['Price Range'] = 'background-color: #1E1E1E; color: #D1D1D1; font-weight: bold; border-right: 1px solid #444;'
+        
+        return style_df
+
+    # 1. Preparamos o DataFrame final sem as colunas de range
+    df_final = comparison_df.drop(columns=['range_A', 'range_B'])
+
+    # 2. Pegamos o nome exato da primeira coluna (para evitar o KeyError)
+    coluna_preço = df_final.columns[6] 
+
+    # 3. Aplicamos o estilo usando o nome dinâmico
+    styled_comparison = df_final.style.set_properties(**{
+        'background-color': '#1E1E1E',
+        'color': '#D1D1D1',
+        'font-weight': 'bold',
+        'border-right': '1px solid #444'
+    }, subset=[coluna_preço]) 
+
+    # 4. Formatações numéricas dinâmicas (ajustado para os nomes que você deu no merge)
+    # Se você renomeou as colunas manualmente antes, garanta que os nomes aqui batam
+    format_dict = {}
+    for col in df_final.columns:
+        if 'rank_median_A' in col or 'rank_median_b' in col: format_dict[col] = '{:.0f}'
+        if 'rank_mean_A' in col or 'rank_mean_B' in col: format_dict[col] = '{:.1f}'
+        if 'days_A' in col or 'days_B' in col: format_dict[col] = '{:.0f}'
+
+    styled_comparison = styled_comparison.format(format_dict)
+
+    # 5. Renderização
+    st.dataframe(styled_comparison, use_container_width=True, hide_index=True)
+            
     if all_magic_results:
         df_export = pd.DataFrame(all_magic_results)
         csv_data = df_export.to_csv(index=False).encode('utf-8')
