@@ -1732,7 +1732,7 @@ with tabs[6]:
     # Se você renomeou as colunas manualmente antes, garanta que os nomes aqui batam
     format_dict = {}
     for col in df_final.columns:
-        if 'rank_median_A' in col or 'rank_median_b' in col: format_dict[col] = '{:.0f}'
+        if 'rank_median_A' in col or 'rank_median_B' in col: format_dict[col] = '{:.0f}'
         if 'rank_mean_A' in col or 'rank_mean_B' in col: format_dict[col] = '{:.1f}'
         if 'days_A' in col or 'days_B' in col: format_dict[col] = '{:.0f}'
 
