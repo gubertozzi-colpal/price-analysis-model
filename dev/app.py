@@ -652,6 +652,29 @@ def get_comparison_stats(df: pd.DataFrame, step: float, tops: list) -> pd.DataFr
     stats['price_range'] = stats['range'].apply(lambda x: f"R$ {x:.2f} - {x+step:.2f}")
     return stats
 
+
+def get_exact_price_stats(df: pd.DataFrame, tops: list) -> pd.DataFrame:
+    """Gera estatísticas consolidadas por preço efetivo exato."""
+    df = df.copy()
+    # Arredondamos para 2 casas para garantir que R$ 19.9000001 seja 19.90
+    df['exact_price'] = df['price_effective'].round(2)
+    
+    for t in tops:
+        df[f'top{t}_share'] = (df['bsr'] <= t).astype(int)
+
+    agg_dict = {
+        'bsr': ['size', 'median', 'mean']
+    }
+    for t in tops:
+        agg_dict[f'top{t}_share'] = 'mean'
+    
+    stats = df.groupby('exact_price').agg(agg_dict).reset_index()
+    stats.columns = ['Preço Efetivo', 'Dias', 'BSR Mediano', 'BSR Médio'] + [f'Top {t} %' for t in tops]
+    
+    return stats.sort_values('Preço Efetivo')
+
+
+
 # ----------------------------
 # METADATA: Enterprise Improvement
 # ----------------------------
@@ -833,6 +856,8 @@ def meta_filters_ui(df: pd.DataFrame) -> pd.DataFrame:
 def filter_period(df: pd.DataFrame, min_date: pd.Timestamp, max_date: pd.Timestamp) -> pd.DataFrame:
     """Filtra o DataFrame para incluir apenas datas entre min_date e max_date (inclusivo)."""
     return df[(df["day"] >= min_date) & (df["day"] <= max_date)]
+
+
 
 
 # ----------------------------
@@ -1673,7 +1698,7 @@ with tabs[6]:
         st.info("Este SKU ainda não possui histórico suficiente para análise de Machine Learning.")
     
 
-    st.write("#### 📊 Performance e Ranquing Share")
+    st.write("#### 📊 Performance e Ranking Share")
     st.markdown("Configure os limites de **Top Rank** para ver a dominância em cada faixa de preço:")
 
     # Inputs Dinâmicos para os "Top X"
@@ -1739,7 +1764,54 @@ with tabs[6]:
     styled_comparison = styled_comparison.format(format_dict)
 
     # 5. Renderização
-    st.dataframe(styled_comparison, use_container_width=True, hide_index=True)
+    st.dataframe(styled_comparison, width='stretch', hide_index=True)
+
+    # --- Dentro da sua Tab, na parte do Detalhamento por Ponto de Preço Exato ---
+
+    st.divider()
+    st.write("#### 🔍 Detalhamento por Ponto de Preço Exato")
+    st.caption("Análise granular de cada preço praticado historicamente.")
+
+    # Definimos uma altura fixa para ambas as tabelas
+    ALTURA_TABELA = 390 
+
+    col_tab_a, col_tab_b = st.columns(2)
+
+    with col_tab_a:
+        st.markdown(f"**Produto A:** `{selected_a}`")
+        exact_a = get_exact_price_stats(data_a, list_tops)
+        
+        styled_exact_a = exact_a.style.set_properties(**{
+            'background-color': '#1E1E1E',
+            'color': '#D1D1D1',
+            'font-weight': 'bold'
+        }, subset=['Preço Efetivo']).format({
+            'Preço Efetivo': 'R$ {:.2f}',
+            'BSR Mediano': '{:.0f}',
+            'BSR Médio': '{:.1f}',
+            **{f'Top {t} %': '{:.1%}' for t in list_tops}
+        })
+        
+        # Adicionado o parâmetro height para fixar o tamanho e habilitar o scroll
+        st.dataframe(styled_exact_a, width='stretch', hide_index=True, height=ALTURA_TABELA)
+
+    with col_tab_b:
+        st.markdown(f"**Produto B:** `{selected_b}`")
+        exact_b = get_exact_price_stats(data_b, list_tops)
+        
+        styled_exact_b = exact_b.style.set_properties(**{
+            'background-color': '#1E1E1E',
+            'color': '#D1D1D1',
+            'font-weight': 'bold'
+        }, subset=['Preço Efetivo']).format({
+            'Preço Efetivo': 'R$ {:.2f}',
+            'BSR Mediano': '{:.0f}',
+            'BSR Médio': '{:.1f}',
+            **{f'Top {t} %': '{:.1%}' for t in list_tops}
+        })
+        
+        # Adicionado o parâmetro height idêntico para alinhar com a Tabela A
+        st.dataframe(styled_exact_b, width='stretch', hide_index=True, height=ALTURA_TABELA)
             
     if all_magic_results:
         df_export = pd.DataFrame(all_magic_results)
