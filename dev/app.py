@@ -1818,7 +1818,7 @@ with tabs[5]:
 
             
         st.dataframe(idx_grouped_styled, width='stretch', hide_index=True)
-        '''
+        
         map_metrica = {'Média': 'mean',
                        'Moda': 'mode',
                        'Mediana': 'median',
@@ -1829,12 +1829,44 @@ with tabs[5]:
 
         idx_all_grouped = idx_all.groupby(['group_price_index', columns_map[ctl_prod]]).agg(
             bsr=('all_bsr', map_metrica[metrica])
-        )
+        ).reset_index()
 
-        idx_all_pivot = idx_all_grouped.pivot(index='group_price_index', columns=columns_map[ctl_prod], values='bsr')
+        idx_all_grouped['bsr'] = idx_all_grouped['bsr'].round(0)
 
-        st.dataframe(idx_all_pivot, width='stretch', hide_index=True)
-        '''
+        # 1. Reset do índice (já estava correto)
+        idx_all_pivot = idx_all_grouped.pivot(
+            index='group_price_index', 
+            columns=columns_map[ctl_prod], 
+            values='bsr'
+        ).reset_index()
+
+        # 2. Renomeia a coluna técnica para o nome de exibição
+        idx_all_pivot.rename(columns={'group_price_index': 'Índice de Preço'}, inplace=True)
+
+        # 3. Aplica o Estilo "Pintadinho" (Dark Mode na primeira coluna)
+        idx_all_styled = idx_all_pivot.style.set_properties(**{
+            'background-color': '#1E1E1E',
+            'color': '#D1D1D1',
+            'font-weight': 'bold',
+            'border-right': '1px solid #444',
+            'text-align': 'left' # Alinha o texto das faixas à esquerda
+        }, subset=['Índice de Preço']) # Aplica só na primeira coluna
+
+        # 4. Centraliza os dados das outras colunas
+        # Pega todas as colunas exceto a primeira
+        cols_dados = idx_all_pivot.columns.drop('Índice de Preço')
+
+        idx_all_styled = idx_all_styled.set_properties(**{
+            'text-align': 'center'
+        }, subset=cols_dados)
+
+        # 5. Formatação Numérica (BSR sem casas decimais) e tratamento de vazios
+        # na_rep='-' substitui os NaN por um traço, fica muito mais limpo
+        idx_all_styled = idx_all_styled.format("{:.0f}", subset=cols_dados, na_rep="-")
+
+        # 6. Renderiza
+        st.dataframe(idx_all_styled, use_container_width=True, hide_index=True)
+        
         if not idx_grouped.empty:
             df_export = pd.DataFrame(idx_grouped)
             csv_data = df_export.to_csv(index=False).encode('utf-8')
