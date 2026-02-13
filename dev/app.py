@@ -674,6 +674,151 @@ def get_exact_price_stats(df: pd.DataFrame, tops: list) -> pd.DataFrame:
     return stats.sort_values('Preço Efetivo')
 
 
+def get_index_price(df: pd.DataFrame, leader_asin: str, compare_asin: str, top_bsr: list, ctl_prod: str, bin_range: float = 5.0) -> pd.DataFrame:
+    """
+    Calcula o índice de preço e agrupa em faixas dinâmicas baseadas no step (bin_range).
+    """
+    # 1. Preparação dos dados (Filtragem e Rename)
+    # Garante que usamos a coluna correta de identificação
+    col_id = columns_map[ctl_prod] 
+    
+    df_leader = df[df[col_id] == leader_asin][['day', 'price_effective', 'bsr']].rename(
+        columns={'price_effective': 'leader_price', 'bsr': 'leader_bsr'}
+    )
+    df_compare = df[df[col_id] == compare_asin][['day', 'price_effective', 'bsr']].rename(
+        columns={'price_effective': 'compare_price', 'bsr': 'compare_bsr'}
+    )
+    
+    # Merge inner para garantir que só comparamos dias onde ambos existiam
+    merged = pd.merge(df_leader, df_compare, on='day', how='inner')
+    
+    if merged.empty:
+        return pd.DataFrame()
+
+    # 2. Cálculo do Índice
+    # Padrão de mercado: (Preço Comparado / Preço Líder) * 100
+    # Se der 110, significa que o comparado é 10% mais caro que o líder.
+    merged['price_index'] = ((merged['compare_price'] / merged['leader_price']) * 100).round(0)
+
+    # 3. Definição dos Limites Dinâmicos (Arredondados pelo bin_range)
+    # Ex: Se o min é 83 e range é 5, o start vira 80.
+    data_min = merged['price_index'].min()
+    data_max = merged['price_index'].max()
+    
+    start = np.floor(data_min // bin_range) * bin_range + (bin_range*2)
+    end = np.ceil(data_max // bin_range) * bin_range - (bin_range*2)
+    
+    # Criação do array de cortes (ex: 80, 85, 90, ..., 120)
+    # Adicionamos +bin_range no final para o arange incluir o último número
+    core_bins = np.arange(start, end + bin_range, bin_range)
+    
+    # Adiciona -inf e +inf para pegar outliers
+    bins = [-float('inf')] + list(core_bins) + [float('inf')]
+    
+    # Remove duplicatas caso o range seja muito curto e ordena
+    bins = sorted(list(set(bins)))
+
+    # 4. Geração Dinâmica das Labels
+    labels = []
+    
+    # Label para o primeiro bucket (-inf até o primeiro corte)
+    labels.append(f"<{int(bins[1])}")
+    
+    # Labels para o "miolo" (intervalos definidos)
+    for i in range(1, len(bins)-2):
+        lower = bins[i]
+        upper = bins[i+1]
+        labels.append(f"{int(lower)} - {int(upper)}")
+        
+    # Label para o último bucket (último corte até inf)
+    labels.append(f">{int(bins[-2])}")
+
+    # 5. Aplicação do pd.cut
+    merged['group_price_index'] = pd.cut(
+        merged['price_index'], 
+        bins=bins, 
+        labels=labels, 
+        include_lowest=True
+    )
+    
+    merged[f'leader_top_1'] = merged['leader_bsr'] <= top_bsr[0]
+    merged[f'leader_top_2'] = merged['leader_bsr'] <= top_bsr[1]
+    merged[f'leader_top_3'] = merged['leader_bsr'] <= top_bsr[2]
+
+    merged[f'compare_top_1'] = merged['compare_bsr'] <= top_bsr[0]
+    merged[f'compare_top_2'] = merged['compare_bsr'] <= top_bsr[1]
+    merged[f'compare_top_3'] = merged['compare_bsr'] <= top_bsr[2]
+
+
+    return merged
+
+
+
+def get_all_index_price(df: pd.DataFrame, leader_asin: str, ctl_prod: str, bin_range: float = 5.0) -> pd.DataFrame:
+
+    df_leader = df[df[columns_map[ctl_prod]] == leader_asin][['day', 'price_effective']].rename(
+        columns={'price_effective': 'leader_price'}
+    )
+
+    df_all = df[df[columns_map[ctl_prod]] != leader_asin][['day', columns_map[ctl_prod],
+                                                           'price_effective', 'bsr']].rename(
+        columns={'price_effective': 'all_price', 'bsr': 'all_bsr'}
+    )
+
+    df_merged = pd.merge(df_leader, df_all, on='day', how='inner')
+    if df_merged.empty:
+        return pd.DataFrame()
+    
+    df_merged['price_index'] = ((df_merged['leader_price'] / df_merged['all_price']) * 100).round(0)
+
+
+    # 3. Definição dos Limites Dinâmicos (Arredondados pelo bin_range)
+    # Ex: Se o min é 83 e range é 5, o start vira 80.
+    data_min = df_merged['price_index'].min()
+    data_max = df_merged['price_index'].max()
+    
+    start = np.floor(data_min // bin_range) * bin_range + (bin_range*2)
+    end = np.ceil(data_max // bin_range) * bin_range - (bin_range*2)
+    
+    # Criação do array de cortes (ex: 80, 85, 90, ..., 120)
+    # Adicionamos +bin_range no final para o arange incluir o último número
+    core_bins = np.arange(start, end + bin_range, bin_range)
+    
+    # Adiciona -inf e +inf para pegar outliers
+    bins = [-float('inf')] + list(core_bins) + [float('inf')]
+    
+    # Remove duplicatas caso o range seja muito curto e ordena
+    bins = sorted(list(set(bins)))
+
+    # 4. Geração Dinâmica das Labels
+    labels = []
+    
+    # Label para o primeiro bucket (-inf até o primeiro corte)
+    labels.append(f"<{int(bins[1])}")
+    
+    # Labels para o "miolo" (intervalos definidos)
+    for i in range(1, len(bins)-2):
+        lower = bins[i]
+        upper = bins[i+1]
+        labels.append(f"{int(lower)} - {int(upper)}")
+        
+    # Label para o último bucket (último corte até inf)
+    labels.append(f">{int(bins[-2])}")
+
+    # 5. Aplicação do pd.cut
+    df_merged['group_price_index'] = pd.cut(
+        df_merged['price_index'], 
+        bins=bins, 
+        labels=labels, 
+        include_lowest=True
+    )
+
+
+    return df_merged
+
+
+
+
 
 # ----------------------------
 # METADATA: Enterprise Improvement
@@ -885,13 +1030,14 @@ with st.sidebar:
         meta_file = st.file_uploader("Upload metadata CSV", type=["csv"])
 
     with st.expander('⚙️ Configurações',expanded=False):
-        roll_days = st.slider("Janela base (dias)", 14, 60, 30, 1)
-        base_q = st.slider("Quantil para base (p80 recomendado)", 0.6, 0.95, 0.8, 0.05)
-        promo_threshold = st.slider("Threshold promo (% abaixo do base)", 0.02, 0.25, 0.05, 0.01)
-        k_clusters = st.slider("Número de clusters", 2, 8, 4, 1)
-        price_step = st.slider("Intervalo de Preço (R$)", min_value=0.1, max_value=5.0, 
+        roll_days = st.number_input("Janela base (dias)",value=30, step=1, key="rol_days", help="Número de dias para calcular o preço base rolante (ex: p80 dos últimos 30 dias).")
+        base_q = st.number_input("Quantil para base (p80 recomendado)", value=0.8, min_value=0.5, max_value=0.99, step=0.01, help="Quantil usado para calcular o preço base (ex: 0.8 para p80).")
+        promo_threshold = st.number_input("Threshold promo (% abaixo do base)", value=0.05, min_value=0.01, max_value=0.5, step=0.01, help="Limiar para considerar um dia como promoção (ex: 0.05 para 5% abaixo do preço base).")
+        k_clusters = st.number_input("Número de clusters",value=3, min_value=2, max_value=10, step=1, help="Número de clusters para segmentação de SKUs (ex: 3 para Ataque, Equilíbrio e Premium).")
+        price_step = st.number_input("Intervalo de Preço (R$)", min_value=0.1, max_value=5.0, 
                                         value=0.5, step=0.1,
                                         help="Define o tamanho do bloco de preço para a tabela comparativa.")
+        bin_range = st.number_input("Intervalo para Price Index (%)", min_value=1, max_value=50, value=5, step=1, help="Define o intervalo para categorizar o Price Index (ex: 10 para blocos de 0-10%, 10-20%, etc).")
 
     
     with st.expander('🎉 Eventos',expanded=False):
@@ -913,7 +1059,6 @@ with st.sidebar:
             st.divider()
         st.session_state["events"] = new_events 
 
-    
 
 # Load core data
 raw = load_all(data_glob=data_glob, dayfirst=dayfirst)
@@ -1125,7 +1270,16 @@ with tabs[1]:
 
     options_full = sorted(daily_f[columns_map[ctl_prod]].dropna().unique().tolist())
 
-    pick = st.multiselect(f"Selecione {ctl_prod}", options=options_full, default=None)
+    col1, col2 = st.columns([2, 1])
+
+    with col1:
+        pick = st.multiselect(f"Selecione {ctl_prod} dos Produtos", options=options_full, default=None)
+
+    with col2:
+        leader = st.selectbox(f"Referência para Índice de Preço", options=options_full, index=0, help="Escolha um SKU líder para comparar os outros (ex: maior volume ou marca referência).")
+    
+    idx = price_index(daily_f, leader_asin=leader)
+
 
     if freq == "Mensal":
 
@@ -1151,6 +1305,13 @@ with tabs[1]:
             discount=("discount", 'median'),
             discount_list=("discount_list", 'median'),
         )
+
+        idx_m = idx.copy()
+        idx_m["month_dt"] = idx_m["day"].dt.to_period("M").dt.to_timestamp()
+        idx_m = idx_m.groupby(["asin", "month_dt"], as_index=False)["price_index"].mean()
+        fig_index = px.line(idx_m, x="month_dt", y="price_index", color="asin", title=f"Índice de preço mensal vs {leader}")
+        fig_index.add_hline(y=1.0, line_dash="dash", annotation_text="Referência = 1.0")
+        st.plotly_chart(fig_index, width='stretch')
 
         fig3 = px.line(monthly.sort_values("month_dt"), x="month_dt", y="discount", color=columns_map[ctl_prod],
                        markers=True, title="Desconto base (quando em promoção)")
@@ -1179,6 +1340,10 @@ with tabs[1]:
         fig2 = px.line(d, x="day", y="bsr", color=columns_map[ctl_prod], 
                        title="BSR diário (menor é melhor)")
         st.plotly_chart(fig2, width='stretch')
+
+        fig_index = px.line(idx, x="day", y="price_index", color="asin", title=f"Índice de preço diário vs {leader}")
+        fig_index.add_hline(y=1.0, line_dash="dash", annotation_text="Referência = 1.0")
+        st.plotly_chart(fig_index, width='stretch')
 
         fig3 = px.line(d.sort_values("day"), x="day", y="discount_pct", color=columns_map[ctl_prod],
                        markers=True, title="Desconto base (quando em promoção)")
@@ -1554,32 +1719,166 @@ with tabs[5]:
         """
     )
 
-    # if metadata includes is_own, offer pool selection
     leader_pool = asins
-    if "is_own" in daily_f.columns and daily_f["is_own"].notna().any():
-        leader_mode = st.radio("Escolher referência entre:", ["Todos", "Só concorrentes (is_own=0)", "Só meus (is_own=1)"], horizontal=True)
-        if "concorrentes" in leader_mode.lower():
-            leader_pool = sorted(daily_f.loc[daily_f["is_own"] == False, "asin"].unique().tolist()) or asins
-        elif "meus" in leader_mode.lower():
-            leader_pool = sorted(daily_f.loc[daily_f["is_own"] == True, "asin"].unique().tolist()) or asins
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        leader = st.selectbox("Escolha o SKU referência (líder)", options=leader_pool, index=0)
 
-    leader = st.selectbox("Escolha o SKU referência (líder)", options=leader_pool, index=0)
-    idx = price_index(daily_f, leader_asin=leader)
+    with col2:
+        index_filtered = [p for p in leader_pool if p != leader]
+        comparacao = st.selectbox("Comparar com:", options = index_filtered, index=0)
+
+    with col3:
+        metrica = st.selectbox('Escolha métrica:', index=0,
+                               options=['Média', 'Moda', 'Mediana', 'Máximo', 'Mínimo'])
+
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        top_idx1 = st.number_input("Limite 1 (Top X)", value=10, step=5, key="idx1")
+    with c2:
+        top_idx2 = st.number_input("Limite 2 (Top X)", value=20, step=5, key="idx2")
+    with c3:
+        top_idx3 = st.number_input("Limite 3 (Top X)", value=50, step=5, key="idx3")
+
+    idx_top_list = [top_idx1, top_idx2, top_idx3]
+
+    idx = get_index_price(daily_f, leader_asin=leader, compare_asin=comparacao, 
+                          bin_range=bin_range, top_bsr=idx_top_list, ctl_prod=ctl_prod)
 
     if idx.empty:
         st.warning("Não consegui montar índice (verifique se o líder tem preço para as datas).")
     else:
-        if freq == "Mensal":
-            idx_m = idx.copy()
-            idx_m["month_dt"] = idx_m["day"].dt.to_period("M").dt.to_timestamp()
-            idx_m = idx_m.groupby(["asin", "month_dt"], as_index=False)["price_index"].mean()
-            fig = px.line(idx_m, x="month_dt", y="price_index", color="asin", title=f"Índice de preço mensal vs {leader}")
-            fig.add_hline(y=1.0, line_dash="dash", annotation_text="Referência = 1.0")
-            st.plotly_chart(fig, width='stretch')
-        else:
-            fig = px.line(idx, x="day", y="price_index", color="asin", title=f"Índice de preço diário vs {leader}")
-            fig.add_hline(y=1.0, line_dash="dash", annotation_text="Referência = 1.0")
-            st.plotly_chart(fig, width='stretch')
+        idx_grouped = idx.groupby('group_price_index').agg(
+            Dias=('day', 'count'),
+            leader_bsr_med=('leader_bsr', 'median'),
+            leader_bsr_mean=('leader_bsr', 'mean'),
+            compare_bsr_med=('compare_bsr', 'median'),
+            compare_bsr_mean=('compare_bsr', 'mean'),
+            leader_top_1=('leader_top_1', 'sum'),
+            leader_top_2=('leader_top_2', 'sum'),
+            leader_top_3=('leader_top_3', 'sum'),
+            compare_top_1=('compare_top_1', 'sum'),
+            compare_top_2=('compare_top_2', 'sum'),
+            compare_top_3=('compare_top_3', 'sum')
+            ).reset_index().sort_values('group_price_index')
+        
+        idx_grouped['leader_top_1'] = idx_grouped['leader_top_1'] / idx_grouped['Dias']
+        idx_grouped['leader_top_2'] = idx_grouped['leader_top_2'] / idx_grouped['Dias']
+        idx_grouped['leader_top_3'] = idx_grouped['leader_top_3'] / idx_grouped['Dias']
+        idx_grouped['compare_top_1'] = idx_grouped['compare_top_1'] / idx_grouped['Dias']
+        idx_grouped['compare_top_2'] = idx_grouped['compare_top_2'] / idx_grouped['Dias']
+        idx_grouped['compare_top_3'] = idx_grouped['compare_top_3'] / idx_grouped['Dias']
+
+
+        order = ['group_price_index', 'Dias', 'leader_bsr_med', 'leader_bsr_mean', 
+                 'leader_top_1','leader_top_2', 'leader_top_3',
+                 'compare_bsr_med', 'compare_bsr_mean',
+                 'compare_top_1','compare_top_2', 'compare_top_3']
+
+        
+        idx_grouped = idx_grouped[order]
+
+        map_columns = {
+            'group_price_index': 'Índice de Preço',
+            'Dias': 'Dias',
+            'leader_bsr_med': f'A_bsr_median',
+            'leader_bsr_mean': f'A_bsr_mean',
+            'compare_bsr_med': f'B_bsr_median',
+            'compare_bsr_mean': f'B_bsr_mean',
+            'leader_top_1': f'A_Top{top_idx1}',
+            'leader_top_2': f'A_Top{top_idx2}',
+            'leader_top_3': f'A_Top{top_idx3}',
+            'compare_top_1': f'B_Top{top_idx1}',
+            'compare_top_2': f'B_Top{top_idx2}',
+            'compare_top_3': f'B_Top{top_idx3}',
+        }
+
+        idx_grouped.rename(columns=map_columns, inplace=True)
+
+        # Formatação de Porcentagem para as colunas de Share
+        cols_to_format = [f'A_Top{t}' for t in idx_top_list] + [f'B_Top{t}' for t in idx_top_list]
+        for col in cols_to_format:
+            idx_grouped[col] = (idx_grouped[col] * 100).map("{:.0f}%".format)
+
+        # Aplica o estilo
+        idx_grouped_styled = idx_grouped.style.set_properties(**{
+            'background-color': '#1E1E1E',
+            'color': '#D1D1D1',
+            'font-weight': 'bold',
+            'border-right': '1px solid #444'
+        }, subset=['Índice de Preço']) 
+
+        format_dict = {}
+        for col in idx_grouped.columns:
+            if 'A_bsr_median' in col or 'B_bsr_median' in col: format_dict[col] = '{:.0f}'
+            if 'A_bsr_mean' in col or 'B_bsr_mean' in col: format_dict[col] = '{:.0f}'
+
+        idx_grouped_styled = idx_grouped_styled.format(format_dict)
+
+            
+        st.dataframe(idx_grouped_styled, width='stretch', hide_index=True)
+        
+        map_metrica = {'Média': 'mean',
+                       'Moda': 'mode',
+                       'Mediana': 'median',
+                       'Máximo': 'max',
+                       'Mínimo': 'min'}
+
+        idx_all = get_all_index_price(daily_f, leader, ctl_prod=ctl_prod, bin_range=bin_range)
+
+        idx_all_grouped = idx_all.groupby(['group_price_index', columns_map[ctl_prod]]).agg(
+            bsr=('all_bsr', map_metrica[metrica])
+        ).reset_index()
+
+        idx_all_grouped['bsr'] = idx_all_grouped['bsr'].round(0)
+
+        # 1. Reset do índice (já estava correto)
+        idx_all_pivot = idx_all_grouped.pivot(
+            index='group_price_index', 
+            columns=columns_map[ctl_prod], 
+            values='bsr'
+        ).reset_index()
+
+        # 2. Renomeia a coluna técnica para o nome de exibição
+        idx_all_pivot.rename(columns={'group_price_index': 'Índice de Preço'}, inplace=True)
+
+        # 3. Aplica o Estilo "Pintadinho" (Dark Mode na primeira coluna)
+        idx_all_styled = idx_all_pivot.style.set_properties(**{
+            'background-color': '#1E1E1E',
+            'color': '#D1D1D1',
+            'font-weight': 'bold',
+            'border-right': '1px solid #444',
+            'text-align': 'left' # Alinha o texto das faixas à esquerda
+        }, subset=['Índice de Preço']) # Aplica só na primeira coluna
+
+        # 4. Centraliza os dados das outras colunas
+        # Pega todas as colunas exceto a primeira
+        cols_dados = idx_all_pivot.columns.drop('Índice de Preço')
+
+        idx_all_styled = idx_all_styled.set_properties(**{
+            'text-align': 'center'
+        }, subset=cols_dados)
+
+        # 5. Formatação Numérica (BSR sem casas decimais) e tratamento de vazios
+        # na_rep='-' substitui os NaN por um traço, fica muito mais limpo
+        idx_all_styled = idx_all_styled.format("{:.0f}", subset=cols_dados, na_rep="-")
+
+        # 6. Renderiza
+        st.dataframe(idx_all_styled, use_container_width=True, hide_index=True)
+        
+        if not idx_grouped.empty:
+            df_export = pd.DataFrame(idx_grouped)
+            csv_data = df_export.to_csv(index=False).encode('utf-8')
+
+        st.download_button(
+                label="📥 Baixar Estratégia de Index e Preço (CSV)",
+                data=csv_data,
+                file_name=f'relatorio_price_index_{leader}_vs_{comparacao}.csv',
+                mime='text/csv',
+                help="Exporta o índece de preço sugerido para todos os SKUs da base."
+            )
+
 
 
 # Tab 7 - Preço Mágico
@@ -1727,17 +2026,6 @@ with tabs[6]:
     cols_to_format = [f'top{t}_share_A' for t in list_tops] + [f'top{t}_share_B' for t in list_tops]
     for col in cols_to_format:
         comparison_df[col] = (comparison_df[col] * 100).map("{:.1f}%".format)
-
-    # Definindo a função de estilo para a coluna de preço
-    def style_price_col(df):
-        # Criamos um DataFrame de estilos vazio
-        style_df = pd.DataFrame('', index=df.index, columns=df.columns)
-        
-        # Aplicamos a cor escura na coluna de 'Price Range'
-        # 'background-color: #262730' é um cinza escuro que combina com o tema dark do Streamlit
-        style_df['Price Range'] = 'background-color: #1E1E1E; color: #D1D1D1; font-weight: bold; border-right: 1px solid #444;'
-        
-        return style_df
 
     # 1. Preparamos o DataFrame final sem as colunas de range
     df_final = comparison_df.drop(columns=['range_A', 'range_B'])
@@ -1948,6 +2236,8 @@ Isso é perfeito para reuniões de categoria: você troca o filtro e o plano mud
 # Tab 11 - Teste
 with tabs[10]:
     st.subheader("🧪 Testes")
+
+    st.dataframe(daily_f.head(), width='stretch', hide_index=True)
 
 
 st.caption("App de análise Preço x BSR com metadata enterprise (template + mapeamento + validação + cobertura).")
